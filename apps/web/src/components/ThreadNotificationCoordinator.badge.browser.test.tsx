@@ -215,3 +215,24 @@ it.each(["hasPendingApprovals", "hasPendingUserInput"] as const)(
     expect(notification.close).toHaveBeenCalled();
   },
 );
+
+it("holds a completion through a continuation gap and notifies once it settles", async () => {
+  await using app = setup();
+  await app.render();
+  const finished = (turnId: string, completedAt: string) => ({
+    latestTurn: { turnId, state: "completed", completedAt },
+  });
+  state.shells.set("one", shell(finished("turn-1", "2026-09-13T07:00:01.000Z")));
+  await app.render();
+  state.shells.set(
+    "one",
+    shell({ latestTurn: { turnId: "turn-2", state: "running", completedAt: null } }),
+  );
+  await app.render();
+  state.shells.set("one", shell(finished("turn-2", "2026-09-13T07:00:02.000Z")));
+  await app.render();
+  expect(TestNotification.sent).toEqual([]);
+  await expect
+    .poll(() => TestNotification.sent.map((sent) => sent.title), { timeout: 4_000 })
+    .toEqual(["Thread completed"]);
+});

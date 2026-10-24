@@ -104,6 +104,13 @@ type TrackedInboxThread = WorkingThreadInput &
     >
   >;
 
+/**
+ * How long a thread that stopped working keeps reading as working. An orchestrator
+ * run can end moments before its continuation starts, so clients wait this long
+ * before treating the thread as done.
+ */
+export const WORKING_EXIT_GRACE_MS = 2_000;
+
 /** Keep at module scope so shelf placement and return order survive route changes. */
 export function createInboxReturnTracker() {
   const keyOf = (thread: Pick<EnvironmentThreadShell, "environmentId" | "id">) =>
@@ -200,7 +207,7 @@ export function createInboxReturnTracker() {
         // Only shelf placement is held: execution state and attention requests stay authoritative.
         const deadline =
           !actual && previous?.working && !actionable && !moved && !excluded
-            ? (previous.deadline ?? at + 2_000)
+            ? (previous.deadline ?? at + WORKING_EXIT_GRACE_MS)
             : null;
         const working = actual || (deadline !== null && deadline > at);
         if (previous?.working && !working) returns.set(key, at);

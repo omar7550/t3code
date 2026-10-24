@@ -306,8 +306,9 @@ interface SidebarThreadPartitionInput {
   readonly serverConfigs: ReadonlyMap<EnvironmentId, EnvironmentServerConfig>;
   readonly optimisticDrop: SidebarOptimisticDrop | null;
   readonly workingShelfEnabled: boolean;
-  // Snooze wakes and the queued-turn grace depend on the clock, so the minute
-  // tick and the precise snooze-wake tick are inputs: a new key repartitions.
+  // Snooze wakes, the queued-turn grace and the Working shelf's exit grace depend
+  // on the clock, so the minute tick, the precise snooze-wake tick and the inbox
+  // tracker's expiry version are inputs: a new key repartitions.
   readonly clockKey: string;
 }
 
@@ -386,7 +387,10 @@ function useSidebarThreads(input: {
           ),
         );
   const workingShelfEnabled = useClientSettings((s) => s.sidebarWorkingShelfEnabled);
-  useSyncExternalStore(inboxReturns.subscribe, inboxReturns.getSnapshot);
+  const inboxReturnsVersion = useSyncExternalStore(
+    inboxReturns.subscribe,
+    inboxReturns.getSnapshot,
+  );
   const nowMinute = useNowMinute();
   // Snooze wake times are second-precise, so classifying with the quantized
   // minute would hold a woken thread on the shelf for up to a minute.
@@ -428,7 +432,7 @@ function useSidebarThreads(input: {
     serverConfigs,
     optimisticDrop,
     workingShelfEnabled,
-    clockKey: `${nowMinute}:${snoozeWakeTick}`,
+    clockKey: `${nowMinute}:${snoozeWakeTick}:${inboxReturnsVersion}`,
   });
   const partitionNextWakeAt = partition.snoozedThreads[0]?.snoozedUntil ?? null;
   if (partitionNextWakeAt !== nextSnoozeWakeAt) setNextSnoozeWakeAt(partitionNextWakeAt);

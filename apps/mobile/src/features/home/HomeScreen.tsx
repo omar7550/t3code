@@ -488,7 +488,10 @@ export function HomeScreen(props: HomeScreenProps) {
       ...(workingShelfEnabled ? [] : sectionAvailability("active")),
     ]);
   })();
-  useSyncExternalStore(threadListInboxReturns.subscribe, threadListInboxReturns.getSnapshot);
+  const inboxReturnsVersion = useSyncExternalStore(
+    threadListInboxReturns.subscribe,
+    threadListInboxReturns.getSnapshot,
+  );
   const threadListV2Layout = (() => {
     threadListInboxReturns.observe(workingShelfEnabled ? props.threads : null);
     return buildThreadListV2Items({
@@ -507,6 +510,7 @@ export function HomeScreen(props: HomeScreenProps) {
       workingShelfExpanded,
       inboxReturnAt: threadListInboxReturns.returnedAt,
       isWorking: threadListInboxReturns.isWorking,
+      inboxReturnsVersion,
       snoozedShelfExpanded,
       settledShelfExpanded,
       selectedThreadKey,

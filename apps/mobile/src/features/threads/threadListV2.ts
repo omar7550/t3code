@@ -591,6 +591,9 @@ export function buildThreadListV2Items(input: {
   readonly workingShelfExpanded?: boolean;
   readonly isWorking?: (thread: EnvironmentThreadShell) => boolean;
   readonly inboxReturnAt?: (thread: EnvironmentThreadShell) => number | undefined;
+  // isWorking and inboxReturnAt change when the exit grace expires, so the
+  // tracker's version is an input: a new version rebuilds the layout.
+  readonly inboxReturnsVersion?: number;
   readonly snoozedShelfExpanded?: boolean;
   readonly settledShelfExpanded?: boolean;
   readonly selectedThreadKey?: string | null;
