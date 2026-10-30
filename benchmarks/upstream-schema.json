@@ -1,0 +1,107 @@
+[
+  {
+    "type": "table",
+    "name": "orchestration_v2_projection_runs",
+    "sql": "CREATE TABLE orchestration_v2_projection_runs (\n      run_id TEXT PRIMARY KEY,\n      thread_id TEXT NOT NULL,\n      ordinal INTEGER NOT NULL,\n      provider TEXT NOT NULL,\n      provider_thread_id TEXT,\n      status TEXT NOT NULL,\n      requested_at TEXT NOT NULL,\n      completed_at TEXT,\n      payload_json TEXT NOT NULL\n    , provider_instance_id TEXT)"
+  },
+  {
+    "type": "table",
+    "name": "orchestration_v2_projection_threads",
+    "sql": "CREATE TABLE orchestration_v2_projection_threads (\n      thread_id TEXT PRIMARY KEY,\n      project_id TEXT NOT NULL,\n      title TEXT NOT NULL,\n      default_provider TEXT NOT NULL,\n      runtime_mode TEXT NOT NULL,\n      interaction_mode TEXT NOT NULL,\n      active_provider_thread_id TEXT,\n      created_at TEXT NOT NULL,\n      updated_at TEXT NOT NULL,\n      archived_at TEXT,\n      deleted_at TEXT,\n      payload_json TEXT NOT NULL\n    , provider_instance_id TEXT)"
+  },
+  {
+    "type": "table",
+    "name": "orchestration_v2_projection_turn_items",
+    "sql": "CREATE TABLE orchestration_v2_projection_turn_items (\n      turn_item_id TEXT PRIMARY KEY,\n      thread_id TEXT NOT NULL,\n      run_id TEXT,\n      node_id TEXT,\n      provider_thread_id TEXT,\n      provider_turn_id TEXT,\n      parent_item_id TEXT,\n      ordinal INTEGER NOT NULL,\n      type TEXT NOT NULL,\n      status TEXT NOT NULL,\n      updated_at TEXT NOT NULL,\n      payload_json TEXT NOT NULL\n    )"
+  },
+  {
+    "type": "index",
+    "name": "orchestration_v2_projection_runs_provider_thread_idx",
+    "sql": "CREATE INDEX orchestration_v2_projection_runs_provider_thread_idx ON orchestration_v2_projection_runs(provider_thread_id)"
+  },
+  {
+    "type": "index",
+    "name": "orchestration_v2_projection_runs_recovery_idx",
+    "sql": "CREATE INDEX orchestration_v2_projection_runs_recovery_idx\n    ON orchestration_v2_projection_runs(status, thread_id)\n    WHERE status IN ('queued', 'preparing', 'starting', 'running', 'waiting')\n  "
+  },
+  {
+    "type": "index",
+    "name": "orchestration_v2_projection_runs_thread_ordinal_idx",
+    "sql": "CREATE UNIQUE INDEX orchestration_v2_projection_runs_thread_ordinal_idx ON orchestration_v2_projection_runs(thread_id, ordinal)"
+  },
+  {
+    "type": "index",
+    "name": "orchestration_v2_projection_runs_thread_status_idx",
+    "sql": "CREATE INDEX orchestration_v2_projection_runs_thread_status_idx ON orchestration_v2_projection_runs(thread_id, status)"
+  },
+  {
+    "type": "index",
+    "name": "orchestration_v2_projection_threads_project_updated_idx",
+    "sql": "CREATE INDEX orchestration_v2_projection_threads_project_updated_idx ON orchestration_v2_projection_threads(project_id, updated_at)"
+  },
+  {
+    "type": "index",
+    "name": "orchestration_v2_projection_turn_items_active_ordinal_idx",
+    "sql": "CREATE INDEX orchestration_v2_projection_turn_items_active_ordinal_idx\n    ON orchestration_v2_projection_turn_items(thread_id, ordinal, turn_item_id)\n    WHERE status IN ('pending', 'running', 'waiting')\n  "
+  },
+  {
+    "type": "index",
+    "name": "orchestration_v2_projection_turn_items_active_run_idx",
+    "sql": "CREATE INDEX orchestration_v2_projection_turn_items_active_run_idx\n    ON orchestration_v2_projection_turn_items(thread_id, run_id)\n    WHERE status IN ('pending', 'running', 'waiting')\n  "
+  },
+  {
+    "type": "index",
+    "name": "orchestration_v2_projection_turn_items_failed_error_idx",
+    "sql": "CREATE INDEX orchestration_v2_projection_turn_items_failed_error_idx\n    ON orchestration_v2_projection_turn_items(\n      thread_id, run_id, node_id, updated_at DESC, ordinal DESC, turn_item_id DESC\n    )\n    WHERE type = 'error' AND status = 'failed'\n  "
+  },
+  {
+    "type": "index",
+    "name": "orchestration_v2_projection_turn_items_node_ordinal_idx",
+    "sql": "CREATE INDEX orchestration_v2_projection_turn_items_node_ordinal_idx ON orchestration_v2_projection_turn_items(node_id, ordinal)"
+  },
+  {
+    "type": "index",
+    "name": "orchestration_v2_projection_turn_items_provider_turn_idx",
+    "sql": "CREATE INDEX orchestration_v2_projection_turn_items_provider_turn_idx ON orchestration_v2_projection_turn_items(provider_turn_id)"
+  },
+  {
+    "type": "index",
+    "name": "orchestration_v2_projection_turn_items_recovery_idx",
+    "sql": "CREATE INDEX orchestration_v2_projection_turn_items_recovery_idx\n    ON orchestration_v2_projection_turn_items(thread_id)\n    WHERE type IN ('command_execution', 'dynamic_tool', 'subagent')\n      AND status IN ('pending', 'running', 'waiting')\n  "
+  },
+  {
+    "type": "index",
+    "name": "orchestration_v2_projection_turn_items_run_ordinal_idx",
+    "sql": "CREATE INDEX orchestration_v2_projection_turn_items_run_ordinal_idx ON orchestration_v2_projection_turn_items(run_id, ordinal)"
+  },
+  {
+    "type": "index",
+    "name": "orchestration_v2_projection_turn_items_shell_pending_idx",
+    "sql": "CREATE INDEX orchestration_v2_projection_turn_items_shell_pending_idx\n    ON orchestration_v2_projection_turn_items(thread_id, run_id)\n    WHERE type IN ('command_execution', 'dynamic_tool', 'subagent')\n      AND status NOT IN ('completed', 'interrupted', 'failed', 'cancelled')\n  "
+  },
+  {
+    "type": "index",
+    "name": "orchestration_v2_projection_turn_items_stop_request_idx",
+    "sql": "CREATE INDEX orchestration_v2_projection_turn_items_stop_request_idx\n    ON orchestration_v2_projection_turn_items(thread_id, run_id)\n    WHERE type = 'run_interrupt_request'\n  "
+  },
+  {
+    "type": "index",
+    "name": "orchestration_v2_projection_turn_items_thread_ordinal_idx",
+    "sql": "CREATE INDEX orchestration_v2_projection_turn_items_thread_ordinal_idx ON orchestration_v2_projection_turn_items(thread_id, ordinal, turn_item_id)"
+  },
+  {
+    "type": "index",
+    "name": "orchestration_v2_projection_turn_items_thread_run_idx",
+    "sql": "CREATE INDEX orchestration_v2_projection_turn_items_thread_run_idx\n    ON orchestration_v2_projection_turn_items(thread_id, run_id)\n  "
+  },
+  {
+    "type": "index",
+    "name": "orchestration_v2_projection_turn_items_user_message_idx",
+    "sql": "CREATE INDEX orchestration_v2_projection_turn_items_user_message_idx\n    ON orchestration_v2_projection_turn_items(thread_id, ordinal, turn_item_id)\n    WHERE type = 'user_message'\n  "
+  },
+  {
+    "type": "index",
+    "name": "orchestration_v2_projection_turn_items_waiting_link_idx",
+    "sql": "CREATE INDEX orchestration_v2_projection_turn_items_waiting_link_idx\n    ON orchestration_v2_projection_turn_items(thread_id, updated_at DESC, turn_item_id DESC)\n    WHERE type = 'link_request' AND status = 'waiting'\n  "
+  }
+]

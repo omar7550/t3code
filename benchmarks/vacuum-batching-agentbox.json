@@ -1,0 +1,95 @@
+{
+  "node": "v24.22.1",
+  "cpu": "Intel(R) Core(TM) i5-8500T CPU @ 2.10GHz",
+  "fixture": "8MiB disposable BLOB table deleted, 1024 free pages reclaimed, WAL NORMAL, 1 warmup and 6 alternating samples; direct SQLite prototype excludes Effect scheduling and concurrent writers",
+  "samples": {
+    "onePage": [
+      {
+        "ms": 28.640400999999997,
+        "commits": 1024,
+        "maxTransactionMs": 0.09359500000002186,
+        "freedPages": 1024,
+        "walBytes": 8437792
+      },
+      {
+        "ms": 28.381354999999985,
+        "commits": 1024,
+        "maxTransactionMs": 0.1017789999999934,
+        "freedPages": 1024,
+        "walBytes": 8437792
+      },
+      {
+        "ms": 28.199308000000002,
+        "commits": 1024,
+        "maxTransactionMs": 0.18460200000001237,
+        "freedPages": 1024,
+        "walBytes": 8437792
+      },
+      {
+        "ms": 29.202169999999995,
+        "commits": 1024,
+        "maxTransactionMs": 0.072104999999965,
+        "freedPages": 1024,
+        "walBytes": 8437792
+      },
+      {
+        "ms": 29.134995000000004,
+        "commits": 1024,
+        "maxTransactionMs": 0.20363300000002482,
+        "freedPages": 1024,
+        "walBytes": 8437792
+      },
+      {
+        "ms": 29.485870999999975,
+        "commits": 1024,
+        "maxTransactionMs": 0.0785099999999943,
+        "freedPages": 1024,
+        "walBytes": 8437792
+      }
+    ],
+    "batch32": [
+      {
+        "ms": 4.754709000000005,
+        "commits": 32,
+        "maxTransactionMs": 0.7246820000000014,
+        "freedPages": 1024,
+        "walBytes": 267832
+      },
+      {
+        "ms": 4.120272,
+        "commits": 32,
+        "maxTransactionMs": 0.14469099999999457,
+        "freedPages": 1024,
+        "walBytes": 267832
+      },
+      {
+        "ms": 4.066933000000006,
+        "commits": 32,
+        "maxTransactionMs": 0.1441960000000222,
+        "freedPages": 1024,
+        "walBytes": 267832
+      },
+      {
+        "ms": 4.229239000000007,
+        "commits": 32,
+        "maxTransactionMs": 0.21533199999998942,
+        "freedPages": 1024,
+        "walBytes": 267832
+      },
+      {
+        "ms": 4.353139000000056,
+        "commits": 32,
+        "maxTransactionMs": 0.1793079999999918,
+        "freedPages": 1024,
+        "walBytes": 267832
+      },
+      {
+        "ms": 5.514205000000004,
+        "commits": 32,
+        "maxTransactionMs": 0.8829029999999989,
+        "freedPages": 1024,
+        "walBytes": 267832
+      }
+    ]
+  }
+}
