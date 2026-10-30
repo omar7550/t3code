@@ -6335,8 +6335,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
               calls.push(model);
               return scenario === "unknown" ? null : reset;
             }).pipe(
-              Effect.flatMap((value) =>
-                scenario === "failure" ? Effect.fail("refresh failed") : Effect.succeed(value),
+              Effect.filterOrFail(
+                () => scenario !== "failure",
+                () => "refresh failed",
               ),
               Effect.orElseSucceed(() => null),
             ),
