@@ -122,6 +122,7 @@ const layerFlakyReleaseEventSink = (flaky: FlakyReleaseWrites) =>
   ).pipe(Layer.provide(layerTestEventSink));
 
 const layerPausingAttachEventSink = (pause: {
+  readonly afterCommitResume?: Deferred.Deferred<void>;
   readonly armed: Ref.Ref<boolean>;
   readonly paused: Deferred.Deferred<void>;
 }) =>
@@ -135,6 +136,14 @@ const layerPausingAttachEventSink = (pause: {
           Effect.gen(function* () {
             const attach = input.events.some((event) => event.type === "provider-session.attached");
             if (attach && (yield* Ref.getAndSet(pause.armed, false))) {
+              const resume = pause.afterCommitResume;
+              if (resume !== undefined) {
+                return yield* delegate.write(input).pipe(
+                  Effect.tap(() => Deferred.succeed(pause.paused, undefined)),
+                  Effect.tap(() => Deferred.await(resume)),
+                  Effect.uninterruptible,
+                );
+              }
               yield* Deferred.succeed(pause.paused, undefined);
               return yield* Effect.never;
             }
@@ -3918,6 +3927,88 @@ it.effect.each([false, true])(
                 isFirst
                   ? Deferred.succeed(closing, undefined).pipe(
                       Effect.andThen(Deferred.await(resume)),
+                    )
+                  : Effect.void,
+              ),
+            ),
+          }),
+        ),
+      );
+    }),
+);
+
+it.effect.each([false, true])(
+  "ProviderSessionManagerV2 preserves release ownership when attachment cancellation follows commit=%s",
+  (committed) =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const closing = yield* Deferred.make<void>();
+      const resumeOld = yield* Deferred.make<void>();
+      const first = yield* Ref.make(true);
+      const armed = yield* Ref.make(false);
+      const paused = yield* Deferred.make<void>();
+      const resumeAttach = yield* Deferred.make<void>();
+      yield* Effect.gen(function* () {
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const sink = yield* EventSink.EventSinkV2;
+        const ids = yield* IdAllocator.IdAllocatorV2;
+        const store = yield* ProjectionStore.ProjectionStoreV2;
+        const threadId = ThreadId.make("thread:attachment-commit-interrupt");
+        const providerSessionId = yield* ids.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+        yield* sink.write({
+          events: [
+            yield* makeThreadCreatedEvent({
+              idAllocator: ids,
+              threadId,
+              now: yield* DateTime.now,
+            }),
+          ],
+        });
+        yield* manager.open({ threadId, providerSessionId, modelSelection, runtimePolicy });
+        const oldClose = yield* manager
+          .release({ providerSessionId, reason: "runtime_error", detail: "old runtime failure" })
+          .pipe(Effect.forkScoped);
+        yield* Deferred.await(closing);
+        yield* Ref.set(armed, true);
+        const replacementOpen = yield* manager
+          .open({
+            threadId,
+            providerSessionId,
+            modelSelection,
+            runtimePolicy,
+          })
+          .pipe(Effect.forkScoped);
+        yield* Deferred.await(paused);
+        // Post-commit cancellation waits on masked completion; pre-commit cancellation must abort.
+        replacementOpen.interruptUnsafe();
+        yield* Deferred.succeed(resumeAttach, undefined);
+        const openExit = yield* Fiber.await(replacementOpen);
+        assert.isTrue(Exit.isFailure(openExit));
+        const replacement = (yield* store.getThreadProjection(threadId)).providerSessions[0];
+        assert.equal(replacement?.status, "stopped");
+        yield* Deferred.succeed(resumeOld, undefined);
+        yield* Fiber.join(oldClose);
+        const after = (yield* store.getThreadProjection(threadId)).providerSessions[0];
+        assert.equal(after?.status, committed ? replacement?.status : "error");
+        assert.equal(after?.lastError, committed ? replacement?.lastError : "old runtime failure");
+      }).pipe(
+        Effect.provide(
+          layerTest({
+            state,
+            idleTimeoutMs: 60_000,
+            pauseAttachWrite: {
+              armed,
+              paused,
+              ...(committed ? { afterCommitResume: resumeAttach } : {}),
+            },
+            beforeClose: Ref.getAndSet(first, false).pipe(
+              Effect.flatMap((isFirst) =>
+                isFirst
+                  ? Deferred.succeed(closing, undefined).pipe(
+                      Effect.andThen(Deferred.await(resumeOld)),
                     )
                   : Effect.void,
               ),

@@ -617,20 +617,22 @@ export const layerWithOptions = (
             }),
           );
           if (events.length > 0) {
-            yield* Effect.uninterruptibleMask((restore) =>
-              restore(eventSink.write({ events })).pipe(
-                Effect.tap(() =>
-                  Effect.sync(() => {
-                    if (input.type !== "provider-session.attached") return;
-                    for (const release of pendingReleaseThreads.values()) {
-                      if (release.providerSessionId === input.runtime.providerSessionId) {
-                        for (const event of events) release.threadIds.delete(event.threadId);
-                      }
-                    }
-                  }),
-                ),
-              ),
-            );
+            yield* eventSink.write({
+              events,
+              // EventSink runs this inside its masked post-commit boundary. A pending
+              // interrupt must not leave the old release owning a durable attachment.
+              onCommitted: (committed) => {
+                if (input.type !== "provider-session.attached") return;
+                for (const [runtime, release] of pendingReleaseThreads) {
+                  if (
+                    runtime !== input.runtime &&
+                    release.providerSessionId === input.runtime.providerSessionId
+                  ) {
+                    for (const event of committed) release.threadIds.delete(event.event.threadId);
+                  }
+                }
+              },
+            });
           }
         },
         (effect, input) =>
