@@ -2797,6 +2797,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       toolUseId: string,
     ) => Effect.Effect<boolean, ClaudeAdapterV2.ClaudeAgentSdkQueryRunnerError>;
     readonly environment?: NodeJS.ProcessEnv;
+    readonly usageLimitResetFallback?: Effect.Effect<string | null>;
     readonly subagentLaunchToolUseId?: string;
     readonly nativeSessionId?: string;
     readonly settings?: ClaudeSettings;
@@ -2860,6 +2861,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         instanceId: ClaudeAdapterV2.CLAUDE_DEFAULT_INSTANCE_ID,
         settings: options?.settings ?? DEFAULT_CLAUDE_SETTINGS,
         environment: options?.environment ?? {},
+        ...(options?.usageLimitResetFallback
+          ? { usageLimitResetFallback: () => options.usageLimitResetFallback! }
+          : {}),
         attachmentsDir,
         fileSystem,
         path: yield* Path.Path,
@@ -4915,6 +4919,151 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       ),
     ),
   );
+
+  describe("usage-limit reset fallback", () => {
+    // The shape a pooling proxy produces: a bare 429 with no rate_limit_event.
+    const runLimitedTurn = (options: {
+      readonly fallback: Effect.Effect<string | null>;
+      readonly rateLimitResetsAt?: number;
+    }) =>
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarnessWithOptions({
+          usageLimitResetFallback: options.fallback,
+        });
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("attempt-claude-reset-fallback"),
+            text: "Continue.",
+            attachments: [],
+          }),
+        );
+        if (options.rateLimitResetsAt !== undefined) {
+          yield* Queue.offer(
+            harness.sdkMessages,
+            claudeSdkFrame({
+              type: "rate_limit_event",
+              rate_limit_info: {
+                status: "rejected",
+                rateLimitType: "five_hour",
+                resetsAt: options.rateLimitResetsAt,
+              },
+              uuid: "00000000-0000-4000-8000-000000000660",
+              session_id: WAKE_NATIVE_SESSION,
+            }),
+          );
+        }
+        yield* Queue.offer(
+          harness.sdkMessages,
+          makeAssistantErrorFrame({
+            uuid: "00000000-0000-4000-8000-000000000661",
+            error: "rate_limit",
+          }),
+        );
+        yield* Queue.offer(
+          harness.sdkMessages,
+          makeResultFrame({
+            uuid: "00000000-0000-4000-8000-000000000662",
+            result: "API Error",
+            terminalReason: "api_error",
+            isError: true,
+            apiErrorStatus: 429,
+          }),
+        );
+        const terminal = yield* Queue.take(harness.terminalReceipts);
+        assert.equal(terminal.status, "failed");
+        if (terminal.status !== "failed") throw new Error("Expected a failed turn.");
+        assert.equal(terminal.failure.class, "usage_limit");
+        return terminal.failure;
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      );
+
+    it.effect("takes the reset time from the fallback when the provider named none", () =>
+      Effect.gen(function* () {
+        const failure = yield* runLimitedTurn({
+          fallback: Effect.succeed("2026-10-10T08:00:00.000Z"),
+        });
+        assert.equal(failure.resetAt, "2026-10-10T08:00:00.000Z");
+      }),
+    );
+
+    it.effect("honors Stop received while the reset lookup is pending", () =>
+      Effect.gen(function* () {
+        const lookupStarted = yield* Deferred.make<void>();
+        const lookupResult = yield* Deferred.make<string | null>();
+        const interruptStarted = yield* Deferred.make<void>();
+        const harness = yield* makeWakeHarnessWithOptions({
+          usageLimitResetFallback: Deferred.succeed(lookupStarted, undefined).pipe(
+            Effect.andThen(Deferred.await(lookupResult)),
+          ),
+          interrupt: Deferred.succeed(interruptStarted, undefined),
+          close: Queue.shutdown,
+        });
+        const attemptId = RunAttemptId.make("attempt-claude-stop-reset-lookup");
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId,
+            text: "Continue.",
+            attachments: [],
+          }),
+        );
+        yield* Queue.offer(
+          harness.sdkMessages,
+          makeResultFrame({
+            uuid: "00000000-0000-4000-8000-000000000663",
+            result: "API Error",
+            terminalReason: "api_error",
+            isError: true,
+            apiErrorStatus: 429,
+          }),
+        );
+        yield* Deferred.await(lookupStarted);
+        const interrupt = yield* harness.runtime
+          .interruptTurn({
+            providerThread: harness.providerThread,
+            providerTurnId: (yield* IdAllocator.IdAllocatorV2).derive.providerTurn({
+              driver: ClaudeAdapterV2.CLAUDE_PROVIDER,
+              nativeTurnId: `turn:${attemptId}`,
+            }),
+          })
+          .pipe(Effect.forkScoped);
+        yield* Deferred.await(interruptStarted);
+        yield* Deferred.succeed(lookupResult, "2026-10-10T08:00:00.000Z");
+        const terminal = yield* Queue.take(harness.terminalReceipts);
+        assert.equal(terminal.status, "interrupted");
+        assert.equal(terminal.failure, null);
+        yield* Fiber.join(interrupt);
+        assert.lengthOf(harness.terminalEvents(), 1);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+    );
+
+    it.effect("does not consult the fallback when the provider reported a reset time", () =>
+      Effect.gen(function* () {
+        let consulted = 0;
+        const failure = yield* runLimitedTurn({
+          rateLimitResetsAt: 1790298600,
+          fallback: Effect.sync(() => {
+            consulted += 1;
+            return "2026-10-10T08:00:00.000Z";
+          }),
+        });
+        assert.equal(failure.resetAt, "2026-09-25T01:10:00.000Z");
+        assert.equal(consulted, 0);
+      }),
+    );
+  });
 
   it.effect.each([
     {

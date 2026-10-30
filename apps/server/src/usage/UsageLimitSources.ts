@@ -1,9 +1,9 @@
 import {
   DEFAULT_PROVIDER_HEALTH_REFRESH_INTERVAL,
   UsageLimitSourceError,
+  type UsageLimitSourceAccount,
   type UsageLimitSourceConsumeResetCreditInput,
   type ProviderConsumeResetCreditResult,
-  type ServerSettings,
   type UsageLimitSourceConfig,
   type UsageLimitSourceId,
   type UsageLimitSourceSnapshot,
@@ -15,6 +15,7 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Equal from "effect/Equal";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
 import * as Semaphore from "effect/Semaphore";
@@ -30,6 +31,8 @@ export class UsageLimitSources extends Context.Service<
     readonly current: Effect.Effect<ReadonlyArray<UsageLimitSourceSnapshot>>;
     readonly streamChanges: Stream.Stream<ReadonlyArray<UsageLimitSourceSnapshot>>;
     readonly refresh: Effect.Effect<void>;
+    /** Fresh recovery evidence for a Claude proxy failure with no native reset. */
+    readonly poolResetAt: (baseUrl: string, model: string) => Effect.Effect<string | null>;
     readonly consumeResetCredit: (
       input: UsageLimitSourceConsumeResetCreditInput,
     ) => Effect.Effect<ProviderConsumeResetCreditResult, UsageLimitSourceError>;
@@ -44,6 +47,62 @@ function sourceLabel(id: string, config: UsageLimitSourceConfig): string {
   } catch {
     return fallback;
   }
+}
+
+function hubOrigin(url: string): string | null {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "http:" || parsed.protocol === "https:" ? parsed.origin : null;
+  } catch {
+    return null;
+  }
+}
+
+function claudeModelIdentity(model: string) {
+  const key = model
+    .toLowerCase()
+    .replace(/\[1m\]$/, "")
+    .replace(/^claude-/, "")
+    .replace(/[-. ]/g, "_")
+    .replace(/_\d{8}$/, "");
+  const match = /^([a-z]+)(?:_(\d+(?:_\d+)?))?$/.exec(key);
+  return match ? { family: match[1], version: match[2] ?? null } : null;
+}
+
+function poolUsageLimitResetAt(
+  accounts: ReadonlyArray<UsageLimitSourceAccount>,
+  nowMs: number,
+  model: string,
+): string | null {
+  const requestedModel = claudeModelIdentity(model);
+  let earliest = Infinity;
+  for (const account of accounts) {
+    if (account.driver !== "claudeAgent") continue;
+    if (account.usageLimits.unavailable) return null;
+    let recovery = -Infinity;
+    for (const window of account.usageLimits.windows) {
+      if (window.usedPercent < 100) continue;
+      if (window.id.startsWith("seven_day_")) {
+        const scopedModel = claudeModelIdentity(window.id.slice("seven_day_".length));
+        // Bare aliases and custom names do not identify which version the hub routes.
+        if (!requestedModel?.version || scopedModel === null) return null;
+        if (
+          scopedModel.family !== requestedModel.family ||
+          (scopedModel.version !== null && scopedModel.version !== requestedModel.version)
+        )
+          continue;
+      }
+      const reset = DateTime.make(window.resetsAt ?? "");
+      if (Option.isNone(reset)) return null;
+      const resetMs = DateTime.toEpochMillis(reset.value);
+      if (resetMs <= nowMs) return null;
+      recovery = Math.max(recovery, resetMs);
+    }
+    // One account with headroom makes the pool's outage unexplained.
+    if (!Number.isFinite(recovery)) return null;
+    earliest = Math.min(earliest, recovery);
+  }
+  return Number.isFinite(earliest) ? DateTime.formatIso(DateTime.makeUnsafe(earliest)) : null;
 }
 
 /** @public */
@@ -85,20 +144,57 @@ export const make = Effect.gen(function* () {
 
   // Serialize refreshes so slow old-settings reads cannot resurrect removed sources after newer refreshes.
   const refreshLock = yield* Semaphore.make(1);
-  const refresh = Effect.gen(function* () {
-    const settings = yield* settingsService.getSettings.pipe(
-      Effect.orElseSucceed((): ServerSettings | null => null),
+  const refreshSources = Effect.fn("UsageLimitSources.refreshSources")(
+    function* (origin: string | undefined) {
+      const settings = yield* settingsService.getSettings.pipe(Effect.orElseSucceed(() => null));
+      const enabled = Object.entries(settings?.usageLimitSources ?? {}).filter(
+        ([, config]) => config.enabled,
+      );
+      const entries = enabled.filter(
+        ([, config]) => origin === undefined || hubOrigin(config.url) === origin,
+      );
+      if (origin !== undefined && entries.length === 0) return [];
+      const snapshots = yield* Effect.forEach(
+        entries,
+        ([id, config]) => readSource(id as UsageLimitSourceId, config),
+        { concurrency: 4 },
+      );
+      const byId = new Map(
+        [...(yield* Ref.get(stateRef)), ...snapshots].map((source) => [source.id, source]),
+      );
+      yield* publish(
+        enabled.flatMap(([id]) => {
+          const snapshot = byId.get(id as UsageLimitSourceId);
+          return snapshot ? [snapshot] : [];
+        }),
+      );
+      return snapshots;
+    },
+    (effect) => effect.pipe(refreshLock.withPermits(1)),
+  );
+
+  const refresh = refreshSources(undefined).pipe(Effect.asVoid, Effect.ignoreCause({ log: true }));
+
+  const poolResetAt = Effect.fn("UsageLimitSources.poolResetAt")(function* (
+    baseUrl: string,
+    model: string,
+  ) {
+    const origin = hubOrigin(baseUrl);
+    if (origin === null) return null;
+    // Never use cached windows after a failed or timed-out refresh: routing
+    // and account availability may have changed since that snapshot.
+    const snapshots = yield* refreshSources(origin).pipe(
+      Effect.timeout("5 seconds"),
+      Effect.orElseSucceed(() => null),
     );
-    const entries = Object.entries(settings?.usageLimitSources ?? {}).filter(
-      ([, config]) => config.enabled,
+    if (snapshots === null || snapshots.some((source) => "error" in source)) return null;
+    const nowMs = DateTime.toEpochMillis(yield* DateTime.now);
+    return poolUsageLimitResetAt(
+      snapshots.flatMap((source) => source.accounts),
+      nowMs,
+      model,
     );
-    const snapshots = yield* Effect.forEach(
-      entries,
-      ([id, config]) => readSource(id as UsageLimitSourceId, config),
-      { concurrency: 4 },
-    );
-    yield* publish(snapshots);
-  }).pipe(refreshLock.withPermits(1), Effect.ignoreCause({ log: true }));
+  });
 
   // Shares the refresh lock so a stale in-flight read cannot overwrite a redemption.
   const consumeResetCredit = Effect.fn("UsageLimitSources.consumeResetCredit")(function* (
@@ -153,6 +249,7 @@ export const make = Effect.gen(function* () {
     current: Ref.get(stateRef),
     consumeResetCredit,
     refresh,
+    poolResetAt,
     get streamChanges() {
       return Stream.unwrap(
         Effect.gen(function* () {
@@ -168,3 +265,14 @@ export const make = Effect.gen(function* () {
 });
 
 export const layer = Layer.effect(UsageLimitSources, make);
+
+/** For tests that build drivers but have no hub: reports no sources and never knows a pool reset. */
+export const layerTest = Layer.succeed(UsageLimitSources, {
+  current: Effect.succeed([]),
+  streamChanges: Stream.make([]),
+  refresh: Effect.void,
+  poolResetAt: Effect.fn("UsageLimitSources.poolResetAt")(() => Effect.succeed(null)),
+  consumeResetCredit: Effect.fn("UsageLimitSources.consumeResetCredit")(() =>
+    Effect.fail(new UsageLimitSourceError({ detail: "No usage limit source in tests." })),
+  ),
+});

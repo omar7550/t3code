@@ -1,3 +1,4 @@
+import * as UsageLimitSources from "../usage/UsageLimitSources.ts";
 import { vi } from "vite-plus/test";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as CodexInstallation from "./CodexInstallation.ts";
@@ -2004,6 +2005,7 @@ it.layer(
           Layer.provideMerge(McpProviderSessions.layer),
           Layer.provideMerge(ModelManifest.layerTest),
           Layer.provideMerge(ResetCreditCoordinator.layerTest),
+          Layer.provideMerge(UsageLimitSources.layerTest),
           Layer.provideMerge(
             OpenCodeRuntime.layer.pipe(Layer.provide(OpenCodeServerLedger.layerTest)),
           ),
@@ -2122,6 +2124,7 @@ it.layer(
           Layer.provideMerge(McpProviderSessions.layer),
           Layer.provideMerge(ModelManifest.layerTest),
           Layer.provideMerge(ResetCreditCoordinator.layerTest),
+          Layer.provideMerge(UsageLimitSources.layerTest),
           Layer.provideMerge(
             OpenCodeRuntime.layer.pipe(Layer.provide(OpenCodeServerLedger.layerTest)),
           ),
@@ -2229,6 +2232,7 @@ it.layer(
           Layer.provideMerge(ProviderLatestVersions.layer),
           Layer.provideMerge(McpProviderSessions.layer),
           Layer.provideMerge(ResetCreditCoordinator.layerTest),
+          Layer.provideMerge(UsageLimitSources.layerTest),
           Layer.provideMerge(layerBackgroundPolicyAlwaysRun),
         ),
       );

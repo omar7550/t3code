@@ -1,3 +1,4 @@
+import * as UsageLimitSources from "../usage/UsageLimitSources.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as CodexInstallation from "./CodexInstallation.ts";
 import * as CodexManagedTokenBroker from "./CodexManagedTokenBroker.ts";
@@ -194,6 +195,7 @@ describe("ProviderInstanceRegistry — multi-instance codex slice", () => {
     Layer.provideMerge(McpProviderSessions.layer),
     Layer.provideMerge(ModelManifest.layerTest),
     Layer.provideMerge(ResetCreditCoordinator.layerTest),
+    Layer.provideMerge(UsageLimitSources.layerTest),
   );
   const layerBase = ProviderHostLive.layer.pipe(Layer.provideMerge(layerBaseDeps));
   const layerTest = ProviderOrchestrationAdapterInfrastructure.layer.pipe(
