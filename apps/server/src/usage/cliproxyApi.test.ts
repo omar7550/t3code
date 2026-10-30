@@ -440,13 +440,33 @@ describe("CLIProxyAPI built-in management API", () => {
             id_token: {},
             account_id: "workspace-plain",
           },
+          {
+            ...accounts[0]!,
+            id: "claude-plain.json",
+            auth_index: "c",
+            provider: "claude",
+            id_token: {},
+            account_id: "claude-account",
+          },
+          {
+            ...accounts[0]!,
+            id: "claude-token.json",
+            auth_index: "t",
+            provider: "claude",
+            id_token: { chatgpt_account_id: " token-workspace " },
+            account_id: "claude-account",
+          },
         ],
       });
       const api = yield* test.api;
-      const [account] = yield* api.readAccounts(config);
-      expect(account?.workspaceId).toBe("workspace-plain");
+      const result = yield* api.readAccounts(config);
+      expect(result.map((account) => [account.id, account.workspaceId])).toEqual([
+        ["plain.json", "workspace-plain"],
+        ["claude-plain.json", undefined],
+        ["claude-token.json", "token-workspace"],
+      ]);
       expect(
-        test.requests.find((request) => request.body?.url?.endsWith("/usage"))?.body?.header?.[
+        test.requests.find((request) => request.body?.auth_index === "p")?.body?.header?.[
           "Chatgpt-Account-Id"
         ],
       ).toBe("workspace-plain");

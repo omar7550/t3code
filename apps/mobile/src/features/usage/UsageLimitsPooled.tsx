@@ -236,6 +236,14 @@ function PoolWindowCard({
               accessibilityLabel={`Segment ${index + 1}, ${accountName(member.account)}, ${pool.label} usage not reported`}
               className={`${wide ? "h-9" : "h-7"} min-w-0 flex-1 items-center justify-center overflow-hidden rounded-md border border-dashed border-border-subtle`}
             >
+              {inlineLabels ? (
+                <Text
+                  numberOfLines={1}
+                  className="max-w-full px-1 text-xs font-t3-medium text-foreground"
+                >
+                  {accountName(member.account)}
+                </Text>
+              ) : null}
               <Text className="text-xs text-foreground-muted">Not reported</Text>
             </View>
           );

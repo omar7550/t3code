@@ -263,7 +263,10 @@ export const makeCliproxyApi = Effect.gen(function* () {
     account: typeof AuthFile.Type,
   ) {
     const checkedAt = DateTime.formatIso(yield* DateTime.now);
-    const workspaceId = codexWorkspaceId(account);
+    const workspaceId =
+      account.provider === "codex"
+        ? codexWorkspaceId(account)
+        : account.id_token?.chatgpt_account_id?.trim();
     const base = {
       id: account.id,
       driver: ProviderDriverKind.make(account.provider === "codex" ? "codex" : "claudeAgent"),
