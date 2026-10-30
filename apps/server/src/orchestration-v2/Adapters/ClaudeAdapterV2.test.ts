@@ -4454,50 +4454,52 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     ),
   );
 
-  it.effect("classifies the screenshot's exact Claude 429 cooling-down message without a reset time", () =>
-    Effect.gen(function* () {
-      const harness = yield* makeWakeHarness;
-      yield* harness.runtime.startTurn(
-        makeClaudeTestTurnInput({
-          threadId: harness.threadId,
-          providerThread: harness.providerThread,
-          now: yield* DateTime.now,
-          attemptId: RunAttemptId.make("attempt-claude-screenshot-429"),
-          text: "Continue.",
-          attachments: [],
-        }),
-      );
-      // Exact visible text from the user-supplied screenshot. The SDK envelope
-      // is synthetic; the screenshot does not establish the original SDK fields.
-      const text =
-        "API Error: Request rejected (429) · All credentials for model claude-opus-5-5 are cooling down (last error: rate_limit_error: This request would exceed your account's rate limit. Please try again later.)";
-      yield* Queue.offerAll(harness.sdkMessages, [
-        makeAssistantErrorFrame({
-          uuid: "00000000-0000-4000-8000-000000009429",
-          error: "rate_limit",
-          text,
-        }),
-        makeResultFrame({
-          uuid: "00000000-0000-4000-8000-000000009430",
-          result: text,
-          isError: true,
-          terminalReason: "api_error",
-          apiErrorStatus: 429,
-        }),
-      ]);
+  it.effect(
+    "classifies the screenshot's exact Claude 429 cooling-down message without a reset time",
+    () =>
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarness;
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("attempt-claude-screenshot-429"),
+            text: "Continue.",
+            attachments: [],
+          }),
+        );
+        // Exact visible text from the user-supplied screenshot. The SDK envelope
+        // is synthetic; the screenshot does not establish the original SDK fields.
+        const text =
+          "API Error: Request rejected (429) · All credentials for model claude-opus-5-5 are cooling down (last error: rate_limit_error: This request would exceed your account's rate limit. Please try again later.)";
+        yield* Queue.offerAll(harness.sdkMessages, [
+          makeAssistantErrorFrame({
+            uuid: "00000000-0000-4000-8000-000000009429",
+            error: "rate_limit",
+            text,
+          }),
+          makeResultFrame({
+            uuid: "00000000-0000-4000-8000-000000009430",
+            result: text,
+            isError: true,
+            terminalReason: "api_error",
+            apiErrorStatus: 429,
+          }),
+        ]);
 
-      const terminal = yield* Queue.take(harness.terminalReceipts);
-      assert.equal(terminal.status, "failed");
-      if (terminal.status !== "failed") return;
-      assert.equal(terminal.failure.class, "usage_limit");
-      assert.equal(terminal.failure.retryable, true);
-      assert.isNull(terminal.failure.resetAt);
-      assert.equal(terminal.failure.code, "api_error_429");
-    }).pipe(
-      Effect.provide(
-        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        const terminal = yield* Queue.take(harness.terminalReceipts);
+        assert.equal(terminal.status, "failed");
+        if (terminal.status !== "failed") return;
+        assert.equal(terminal.failure.class, "usage_limit");
+        assert.equal(terminal.failure.retryable, true);
+        assert.isNull(terminal.failure.resetAt);
+        assert.equal(terminal.failure.code, "api_error_429");
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
       ),
-    ),
   );
 
   it.effect("names an expired Claude login instead of the terminal API error", () =>
