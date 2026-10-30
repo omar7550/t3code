@@ -9380,13 +9380,15 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                     code: "compaction_failed",
                   })
                 : providerFailureFromResult(message, completedAt, failureHint, usageLimited);
+            const hasUnknownNativeReset = resetTimes.some((time) => time === null);
             const usesResetFallback =
               resultFailure?.class === "usage_limit" &&
+              !hasUnknownNativeReset &&
               resetAt === null &&
               resultFailure.resetAt == null &&
               adapterOptions.usageLimitResetFallback !== undefined;
             const resolvedResetAt =
-              resultFailure?.class === "usage_limit"
+              resultFailure?.class === "usage_limit" && !hasUnknownNativeReset
                 ? (resetAt ??
                   resultFailure.resetAt ??
                   (adapterOptions.usageLimitResetFallback

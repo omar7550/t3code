@@ -6323,80 +6323,95 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     ),
   );
 
-  it.effect.each(["fallback", "native", "unknown", "failure"])(
-    "propagates proxy reset fallback with native precedence: %s",
-    (scenario) =>
-      Effect.gen(function* () {
-        const calls: string[] = [];
-        const reset = "2099-10-20T12:10:00.000Z";
-        const harness = yield* makeWakeHarnessWithOptions({
-          usageLimitResetFallback: (model) =>
-            Effect.sync(() => {
-              calls.push(model);
-              return scenario === "unknown" ? null : reset;
-            }).pipe(
-              Effect.filterOrFail(
-                () => scenario !== "failure",
-                () => "refresh failed",
-              ),
-              Effect.orElseSucceed(() => null),
+  it.effect.each([
+    "fallback",
+    "native",
+    "native-unknown",
+    "native-mixed-unknown",
+    "unknown",
+    "failure",
+  ])("propagates proxy reset fallback with native precedence: %s", (scenario) =>
+    Effect.gen(function* () {
+      const calls: string[] = [];
+      const reset = "2099-10-20T12:10:00.000Z";
+      const harness = yield* makeWakeHarnessWithOptions({
+        usageLimitResetFallback: (model) =>
+          Effect.sync(() => {
+            calls.push(model);
+            return scenario === "unknown" ? null : reset;
+          }).pipe(
+            Effect.filterOrFail(
+              () => scenario !== "failure",
+              () => "refresh failed",
             ),
-        });
-        const now = yield* DateTime.now;
-        yield* harness.runtime.startTurn(
-          makeClaudeTestTurnInput({
-            threadId: harness.threadId,
-            providerThread: harness.providerThread,
-            now,
-            attemptId: RunAttemptId.make(`attempt-fallback-${scenario}`),
-            text: "Continue.",
-            attachments: [],
-          }),
-        );
-        if (scenario === "native")
-          yield* Queue.offer(
-            harness.sdkMessages,
-            makeAssistantErrorFrame({
-              uuid: "00000000-0000-4000-8000-000000000699",
-              error: "rate_limit",
-              parentToolUseId: null,
-              apiErrorParams: {
-                rate_limit_info: {
-                  status: "rejected",
-                  rateLimitType: "five_hour",
-                  resetsAt: 1790298600,
-                },
-              },
-            }),
-          );
+            Effect.orElseSucceed(() => null),
+          ),
+      });
+      const now = yield* DateTime.now;
+      yield* harness.runtime.startTurn(
+        makeClaudeTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now,
+          attemptId: RunAttemptId.make(`attempt-fallback-${scenario}`),
+          text: "Continue.",
+          attachments: [],
+        }),
+      );
+      if (scenario === "native-mixed-unknown")
         yield* Queue.offer(
           harness.sdkMessages,
-          makeResultFrame({
-            uuid: "00000000-0000-4000-8000-000000000698",
-            result:
-              'API Error: 429 {"error":{"type":"rate_limit_error","message":"Please try again later."}}',
-            isError: true,
-            apiErrorStatus: 429,
+          claudeSdkFrame({
+            type: "rate_limit_event",
+            rate_limit_info: {
+              status: "rejected",
+              rateLimitType: "seven_day",
+              resetsAt: 1790298600,
+            },
+            uuid: "00000000-0000-4000-8000-000000000696",
+            session_id: WAKE_NATIVE_SESSION,
           }),
         );
-        const terminal = yield* Queue.take(harness.terminalReceipts);
-        assert.equal(terminal.status, "failed");
-        if (terminal.status !== "failed") return;
-        assert.equal(terminal.failure.class, "usage_limit");
-        assert.equal(
-          terminal.failure.resetAt,
-          scenario === "native"
-            ? "2026-09-25T01:10:00.000Z"
-            : scenario === "fallback"
-              ? reset
-              : null,
+      if (scenario.startsWith("native"))
+        yield* Queue.offer(
+          harness.sdkMessages,
+          makeAssistantErrorFrame({
+            uuid: "00000000-0000-4000-8000-000000000699",
+            error: "rate_limit",
+            parentToolUseId: null,
+            apiErrorParams: {
+              rate_limit_info: {
+                status: "rejected",
+                rateLimitType: "five_hour",
+                ...(scenario === "native" ? { resetsAt: 1790298600 } : {}),
+              },
+            },
+          }),
         );
-        assert.equal(calls.length, scenario === "native" ? 0 : 1);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
+      yield* Queue.offer(
+        harness.sdkMessages,
+        makeResultFrame({
+          uuid: "00000000-0000-4000-8000-000000000698",
+          result:
+            'API Error: 429 {"error":{"type":"rate_limit_error","message":"Please try again later."}}',
+          isError: true,
+          apiErrorStatus: 429,
+        }),
+      );
+      const terminal = yield* Queue.take(harness.terminalReceipts);
+      assert.equal(terminal.status, "failed");
+      if (terminal.status !== "failed") return;
+      assert.equal(terminal.failure.class, "usage_limit");
+      assert.equal(
+        terminal.failure.resetAt,
+        scenario === "native" ? "2026-09-25T01:10:00.000Z" : scenario === "fallback" ? reset : null,
+      );
+      assert.equal(calls.length, scenario.startsWith("native") ? 0 : 1);
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
       ),
+    ),
   );
 
   it.effect.each([
