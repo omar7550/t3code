@@ -2580,6 +2580,7 @@ describe("ClaudeAdapterV2 MCP credential channel", () => {
     "translates signed proxy metadata after SDK decoding and before terminal delivery",
     () =>
       Effect.gen(function* () {
+        using _now = vi.spyOn(Date, "now").mockReturnValue(1_800_000_000_000);
         const cli = makeFakeClaudeCli();
         const session = yield* openWith(cli, {
           PATH: "/usr/bin",
@@ -5285,6 +5286,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     "keeps proxy resets subject to unknown native windows (%s)",
     (unknownNativeWindow) =>
       Effect.gen(function* () {
+        yield* TestClock.setTime(1_800_000_000_000);
         const harness = yield* makeWakeHarness;
         yield* harness.runtime.startTurn(
           makeClaudeTestTurnInput({
