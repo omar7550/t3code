@@ -29,28 +29,45 @@ const v2TableCount = Effect.gen(function* () {
 });
 
 describe("runMigrations", () => {
-  it.effect("keeps the shared session snapshot for every existing binding", () =>
-    Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient;
-      yield* runMigrations({ toMigrationInclusive: 75 });
-      const payload = '{"id":"shared","status":"error","lastError":"process exited"}';
-      yield* sql`INSERT INTO orchestration_v2_projection_provider_sessions
+  it.effect.each([75, 76])(
+    "keeps the shared session snapshot for every existing binding after migration %s",
+    (throughId) =>
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        yield* runMigrations({ toMigrationInclusive: throughId });
+        const payload = '{"id":"shared","status":"error","lastError":"process exited"}';
+        yield* sql`INSERT INTO orchestration_v2_projection_provider_sessions
         (provider_session_id, thread_id, provider, status, updated_at, payload_json)
         VALUES ('shared', 'a', 'codex', 'error', '2026-10-30T00:00:00.000Z', ${payload})`;
-      for (const threadId of ["a", "b"]) {
-        yield* sql`INSERT INTO orchestration_v2_projection_provider_session_bindings
+        for (const threadId of ["a", "b"]) {
+          yield* sql`INSERT INTO orchestration_v2_projection_provider_session_bindings
           (provider_session_id, thread_id) VALUES ('shared', ${threadId})`;
-      }
-      yield* runMigrations();
-      assert.deepEqual(
-        yield* sql`SELECT thread_id, payload_json
+        }
+        assert.deepStrictEqual(
+          yield* runMigrations(),
+          throughId === 75
+            ? [
+                [76, "ProjectionProjectsPinArchive"],
+                [77, "ProviderSessionBindingPayloads"],
+              ]
+            : [[77, "ProviderSessionBindingPayloads"]],
+        );
+        assert.deepStrictEqual(yield* history, migrationManifest);
+        assert.deepStrictEqual(yield* runMigrations(), []);
+        const projectColumns = yield* sql<{
+          readonly name: string;
+        }>`PRAGMA table_info(projection_projects)`;
+        assert.isTrue(projectColumns.some((column) => column.name === "pinned_at"));
+        assert.isTrue(projectColumns.some((column) => column.name === "archived_at"));
+        assert.deepEqual(
+          yield* sql`SELECT thread_id, payload_json
           FROM orchestration_v2_projection_provider_session_bindings ORDER BY thread_id`,
-        [
-          { thread_id: "a", payload_json: payload },
-          { thread_id: "b", payload_json: payload },
-        ],
-      );
-    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+          [
+            { thread_id: "a", payload_json: payload },
+            { thread_id: "b", payload_json: payload },
+          ],
+        );
+      }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
 
   it.effect("refuses to start when another migration took a V2 id", () =>

@@ -48,11 +48,13 @@ import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter"
 import * as ProviderEventIngestor from "./ProviderEventIngestor.ts";
 import type { ProjectionStoreV2Error } from "./ProjectionStore.ts";
 import {
+  knownProviderFailureMessage,
   makeProviderFailure,
   makeProviderFailureTurnItem,
 } from "@t3tools/provider-core/server/failure";
 import * as RunFinalizationService from "./RunFinalizationService.ts";
 import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
+import { userFacingDatabaseErrorMessage } from "./UserFacingErrors.ts";
 
 export interface ProviderEventRoutingState {
   readonly ownedThreadIds: ReadonlySet<ThreadId>;
@@ -923,21 +925,24 @@ export const layer: Layer.Layer<
                   .responseStreamingMode,
             ),
           );
-          yield* checkpointService
-            .captureBaseline({
-              scope: input.checkpointScope,
-              ordinalWithinScope: Math.max(0, input.run.ordinal - 1),
-            })
-            .pipe(
-              Effect.catchCauseIf(
-                (cause) => !Cause.hasInterruptsOnly(cause),
-                (_cause) =>
-                  Effect.logWarning(
-                    "orchestration V2 checkpoint baseline capture failed; starting provider without a baseline",
-                    { runId: input.run.id },
-                  ),
-              ),
-            );
+          // Side chats share the parent's worktree; a snapshot would capture the parent's edits.
+          yield* (
+            input.appThread.lineage.sideChat === true
+              ? Effect.void
+              : checkpointService.captureBaseline({
+                  scope: input.checkpointScope,
+                  ordinalWithinScope: Math.max(0, input.run.ordinal - 1),
+                })
+          ).pipe(
+            Effect.catchCauseIf(
+              (cause) => !Cause.hasInterruptsOnly(cause),
+              (_cause) =>
+                Effect.logWarning(
+                  "orchestration V2 checkpoint baseline capture failed; starting provider without a baseline",
+                  { runId: input.run.id },
+                ),
+            ),
+          );
           if (
             input.shouldStartProviderTurn !== undefined &&
             !(yield* input.shouldStartProviderTurn())
@@ -1568,6 +1573,7 @@ export const layer: Layer.Layer<
                     : null;
                 const latestItemOrdinal = yield* Ref.get(latestTurnItemOrdinal);
                 const openSubagents = yield* Ref.get(openRunOwnedSubagents);
+                const squashed = Cause.squash(cause);
                 let nextRetryWarningAt = completedAt;
                 const failRun = writeFinalRunEvents({
                   run: input.run,
@@ -1583,7 +1589,13 @@ export const layer: Layer.Layer<
                   ...(abandonedProviderTurn === null ? {} : { abandonedProviderTurn }),
                   completedAt,
                   terminal: makeFailedTerminalEvent(
-                    makeProviderFailure({ cause: Cause.squash(cause), class: "unknown" }),
+                    makeProviderFailure({
+                      cause: squashed,
+                      message:
+                        knownProviderFailureMessage(squashed) ??
+                        userFacingDatabaseErrorMessage(squashed),
+                      class: "unknown",
+                    }),
                     latestItemOrdinal + 1,
                   ),
                   failureItemPersisted: false,
