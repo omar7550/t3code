@@ -5,14 +5,18 @@ import * as SqlClient from "effect/sql/SqlClient";
 import { runMigrations } from "../Migrations.ts";
 
 it.layer(NodeSqliteClient.layer({ filename: ":memory:" }))(
-  "076_BackgroundRecoveryIndexes",
+  "077_BackgroundRecoveryIndexes",
   (it) => {
     it.effect(
       "seeks usage-limit failures and the latest executed run without scanning payloads or sorting history",
       () =>
         Effect.gen(function* () {
           const sql = yield* SqlClient.SqlClient;
-          yield* runMigrations({ toMigrationInclusive: 75 });
+          yield* runMigrations({ toMigrationInclusive: 76 });
+          assert.deepEqual(
+            yield* sql`SELECT name FROM effect_sql_migrations WHERE migration_id = 76`,
+            [{ name: "ProjectionProjectsPinArchive" }],
+          );
           for (const [id, type, status, failureClass] of [
             ["limit", "error", "failed", "usage_limit"],
             ["other", "error", "failed", "provider"],
@@ -45,7 +49,8 @@ it.layer(NodeSqliteClient.layer({ filename: ":memory:" }))(
         ORDER BY latest.completed_at IS NULL DESC, latest.completed_at DESC,
           latest.ordinal DESC, latest.run_id DESC LIMIT 1`;
           const before = yield* Effect.forEach([recovery, latest], (query) => sql.unsafe(query));
-          yield* runMigrations();
+          assert.deepEqual(yield* runMigrations(), [[77, "BackgroundRecoveryIndexes"]]);
+          assert.deepEqual(yield* runMigrations(), []);
           const after = yield* Effect.forEach([recovery, latest], (query) => sql.unsafe(query));
           assert.deepEqual(after, before);
           assert.deepEqual(after, [[{ thread_id: "limit" }], [{ run_id: "active" }]]);
