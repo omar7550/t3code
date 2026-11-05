@@ -1,7 +1,7 @@
 import { isMacPlatform } from "~/lib/utils";
 
-export const isHtmlFilePath = (path: string): boolean =>
-  /\.html?$/i.test(path.split(/[?#]/, 1)[0] ?? "");
+/** Literal filesystem paths, as the desktop check and the file viewer's preview test them. */
+export const isHtmlFilePath = (path: string): boolean => /\.html?$/i.test(path);
 
 /**
  * Safari only when the desktop shell opens the file on a Mac. Other desktops hand it to the

@@ -16,10 +16,13 @@ describe("systemBrowserLabel", () => {
   });
 });
 
-it("treats .html and .htm as HTML, not .xhtml", () => {
+it("treats literal .html and .htm paths as HTML, not .xhtml", () => {
   expect(isHtmlFilePath("/site/index.HTML")).toBe(true);
-  expect(isHtmlFilePath("/site/a.htm?x=1")).toBe(true);
+  expect(isHtmlFilePath("/site/a.htm")).toBe(true);
   expect(isHtmlFilePath("/site/a.xhtml")).toBe(false);
+  // `#` and `?` are part of the file name, matching what the desktop accepts.
+  expect(isHtmlFilePath("/site/a#b.html")).toBe(true);
+  expect(isHtmlFilePath("/site/a.html#x")).toBe(false);
 });
 
 describe("readResponseBytes", () => {
