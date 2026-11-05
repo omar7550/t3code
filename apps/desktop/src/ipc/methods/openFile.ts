@@ -19,7 +19,7 @@ import * as DesktopEnvironment from "../../app/DesktopEnvironment.ts";
 import * as IpcChannels from "../channels.ts";
 import * as DesktopIpc from "../DesktopIpc.ts";
 
-const BROWSER_FILE_PATTERN = /\.(?:html?|xhtml)$/i;
+const BROWSER_FILE_PATTERN = /\.html?$/i;
 // Characters Windows rejects in file names, plus control characters.
 const UNSAFE_SEGMENT_CHARACTERS = /[<>:"|?*\u0000-\u001f]/g;
 
@@ -74,8 +74,18 @@ export function openFileCachePath(input: {
   return input.join(input.cacheRoot, environment, ...segments);
 }
 
-export function canOpenFileInBrowser(path: string): boolean {
-  return BROWSER_FILE_PATTERN.test(path);
+/**
+ * Only HTML documents pass, for either action: the copy source writes renderer-supplied bytes
+ * to disk, and a revealed `.command` or `.webloc` there would run on a double-click in Finder.
+ * Local paths must be absolute, which also keeps a leading `-` away from `open`'s options.
+ */
+export function isOpenFileRequestAllowed(input: {
+  readonly path: string;
+  readonly source: "local" | "copy";
+  readonly isAbsolute: (path: string) => boolean;
+}): boolean {
+  if (!BROWSER_FILE_PATTERN.test(input.path)) return false;
+  return input.source === "copy" || input.isAbsolute(input.path);
 }
 
 const openExternalFile = (filePath: string) =>
@@ -89,6 +99,10 @@ const openExternalFile = (filePath: string) =>
 // Safari is the default on macOS; when it cannot launch, the system's handler for the file wins.
 const openInSafari = (filePath: string) =>
   Effect.callback<boolean>((resume) => {
+    if (filePath.startsWith("-")) {
+      resume(Effect.succeed(false));
+      return;
+    }
     NodeChildProcess.execFile("open", ["-a", "Safari", filePath], (error) => {
       resume(error === null ? Effect.succeed(true) : openExternalFile(filePath));
     });
@@ -101,6 +115,7 @@ const launch = (action: DesktopOpenFileAction, platform: NodeJS.Platform, filePa
       return true;
     });
   }
+  // Elsewhere this is the system's default app for .html, which is normally the default browser.
   return platform === "darwin" ? openInSafari(filePath) : openExternalFile(filePath);
 };
 
@@ -109,12 +124,18 @@ export const openFile = DesktopIpc.makeIpcMethod({
   payload: DesktopOpenFileInputSchema,
   result: DesktopOpenFileResultSchema,
   handler: Effect.fn("desktop.ipc.openFile")(function* (input) {
-    if (input.action === "browser" && !canOpenFileInBrowser(input.path)) {
-      return "failed" satisfies DesktopOpenFileResult;
-    }
     const environment = yield* DesktopEnvironment.DesktopEnvironment;
     const fileSystem = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
+    if (
+      !isOpenFileRequestAllowed({
+        path: input.path,
+        source: input.source._tag,
+        isAbsolute: path.isAbsolute,
+      })
+    ) {
+      return "failed" satisfies DesktopOpenFileResult;
+    }
 
     if (input.source._tag === "local") {
       const info = yield* fileSystem.stat(input.path).pipe(Effect.option);

@@ -119,7 +119,8 @@ import {
 } from "./filePreviewMode";
 import { changeFileSaveSession, useFileSaveSession } from "./fileSaveSessions";
 import { revisionedQuery } from "~/state/revisionedQuery";
-import { isHtmlFilePath, useHtmlFileOpener } from "~/htmlFileOpen";
+import { useHtmlFileOpener } from "~/htmlFileOpen";
+import { isHtmlFilePath } from "~/htmlFileOpen.logic";
 import type { OpenInPickerHtmlFile } from "~/components/chat/OpenInPicker";
 import {
   getOptimisticProjectFileQueryData,

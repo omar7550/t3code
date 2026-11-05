@@ -185,7 +185,8 @@ import {
   BrowserPreviewUnavailableError,
   BrowserSettingsReadError,
 } from "../browser/openFileInPreview";
-import { isHtmlFilePath, useHtmlFileOpener } from "~/htmlFileOpen";
+import { useHtmlFileOpener } from "~/htmlFileOpen";
+import { isHtmlFilePath } from "~/htmlFileOpen.logic";
 import { resolveLinkTarget } from "../browser/browserLinkTarget";
 import { PullRequestLinkPreview } from "./pullRequest/PullRequestLinkPreview";
 import { MarkdownCodeBlock, SuspenseShikiCodeBlock } from "./chat/MarkdownCodeBlock";

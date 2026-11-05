@@ -10,18 +10,13 @@ import { resolveAssetUrl } from "~/assets/assetUrls";
 import { workspaceAssetResource } from "~/components/files/filePreviewMode";
 import { revealInFileExplorerLabel } from "~/components/preview/fileExplorerLabel";
 import { toastManager } from "~/components/ui/toast";
-import { isMacPlatform } from "~/lib/utils";
 import { useRemoteOpenState } from "~/remoteOpen";
 import { assetEnvironment } from "~/state/assets";
 import { useEnvironmentHttpBaseUrl } from "~/state/environments";
 import { useFilesystemReadAccess } from "~/state/filesystem";
 import { useAtomQueryRunner } from "~/state/use-atom-query-runner";
 
-export const isHtmlFilePath = (path: string): boolean =>
-  /\.(?:html?|xhtml)$/i.test(path.split(/[?#]/, 1)[0] ?? "");
-
-const systemBrowserLabel = (platform: string): string =>
-  isMacPlatform(platform) ? "Safari" : "Browser";
+import { readResponseBytes, systemBrowserLabel } from "./htmlFileOpen.logic";
 
 export interface HtmlFileTarget {
   readonly absolutePath: string;
@@ -46,14 +41,7 @@ function htmlFileAssetResource(target: HtmlFileTarget): AssetResource {
 async function readFileBytes(url: string): Promise<Uint8Array> {
   const response = await fetch(url, { cache: "no-store" });
   if (!response.ok) throw new Error("The file could not be downloaded.");
-  const tooLarge = new Error("Files over 200 MB cannot be opened from another machine.");
-  if (Number(response.headers.get("content-length")) > DESKTOP_OPEN_FILE_COPY_MAX_BYTES) {
-    await response.body?.cancel();
-    throw tooLarge;
-  }
-  const bytes = new Uint8Array(await response.arrayBuffer());
-  if (bytes.byteLength > DESKTOP_OPEN_FILE_COPY_MAX_BYTES) throw tooLarge;
-  return bytes;
+  return readResponseBytes(response, DESKTOP_OPEN_FILE_COPY_MAX_BYTES);
 }
 
 /**
@@ -70,7 +58,10 @@ export function useHtmlFileOpener(environmentId: EnvironmentId | null) {
     refresh: true,
   });
   const desktopOpenFile = window.desktopBridge?.openFile;
-  const platform = navigator.platform;
+  const browserLabel = systemBrowserLabel({
+    platform: navigator.platform,
+    hasDesktopOpen: desktopOpenFile !== undefined,
+  });
   const canDownload = environmentId !== null && canReadFiles && httpBaseUrl !== null;
 
   const openWithDesktop = async (
@@ -118,10 +109,7 @@ export function useHtmlFileOpener(environmentId: EnvironmentId | null) {
     } catch (cause) {
       toastManager.add({
         type: "error",
-        title:
-          action === "reveal"
-            ? "Unable to reveal file"
-            : `Unable to open in ${systemBrowserLabel(platform)}`,
+        title: action === "reveal" ? "Unable to reveal file" : `Unable to open in ${browserLabel}`,
         description: cause instanceof Error ? cause.message : target.absolutePath,
       });
       return false;
@@ -132,8 +120,8 @@ export function useHtmlFileOpener(environmentId: EnvironmentId | null) {
     /** Web clients without the desktop shell open the file in a new browser tab instead. */
     canOpen: desktopOpenFile !== undefined ? environmentId !== null : canDownload,
     canReveal: desktopOpenFile !== undefined && environmentId !== null,
-    browserLabel: systemBrowserLabel(platform),
-    revealLabel: revealInFileExplorerLabel(platform),
+    browserLabel,
+    revealLabel: revealInFileExplorerLabel(navigator.platform),
     open,
   };
 }

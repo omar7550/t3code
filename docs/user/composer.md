@@ -356,6 +356,13 @@ On web and desktop, HTML and PDF files open as rendered pages. Switch an HTML
 file to source view to read its markup; a link to a specific line opens source
 automatically. HTML previews cannot access your T3 Code session.
 
+On desktop, an HTML file's open button and a double-click in the file tree or on a
+chat link open it in Safari (another OS's default app for HTML); the button's
+menu also offers Reveal in Finder. A file on a remote environment is first copied
+into the app's cache, `~/Library/Caches/<app name>/remote-open/` on macOS, and the
+copy is refreshed on every open. Files that load other local files, such as
+images by relative path, show without them. In a browser, the file opens in a new tab.
+
 The file viewer recognizes images, HTML, and PDF files by their filename extension,
 including filenames or folders containing `#` or `?`.
 

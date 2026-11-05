@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vite-plus/test";
 
 vi.mock("electron", () => ({ shell: {} }));
 
-import { canOpenFileInBrowser, openFileCachePath, openFileCacheRoot } from "./openFile.ts";
+import { isOpenFileRequestAllowed, openFileCachePath, openFileCacheRoot } from "./openFile.ts";
 
 const join = NodePath.posix.join;
 
@@ -57,8 +57,24 @@ describe("openFileCachePath", () => {
   });
 });
 
-it("only opens HTML documents in the browser", () => {
-  expect(canOpenFileInBrowser("/a/index.HTML")).toBe(true);
-  expect(canOpenFileInBrowser("/a/page.htm")).toBe(true);
-  expect(canOpenFileInBrowser("/a/script.sh")).toBe(false);
+describe("isOpenFileRequestAllowed", () => {
+  const allowed = (path: string, source: "local" | "copy") =>
+    isOpenFileRequestAllowed({ path, source, isAbsolute: NodePath.posix.isAbsolute });
+
+  it("accepts absolute local HTML and copied HTML", () => {
+    expect(allowed("/a/index.HTML", "local")).toBe(true);
+    expect(allowed("/a/page.htm", "copy")).toBe(true);
+  });
+
+  it("refuses other file types for both sources, so nothing runnable lands in the cache", () => {
+    for (const path of ["/a/run.command", "/a/x.terminal", "/a/site.webloc", "/a/page.xhtml"]) {
+      expect(allowed(path, "copy"), path).toBe(false);
+      expect(allowed(path, "local"), path).toBe(false);
+    }
+  });
+
+  it("refuses relative local paths, including ones that look like options", () => {
+    expect(allowed("page.html", "local")).toBe(false);
+    expect(allowed("-a.html", "local")).toBe(false);
+  });
 });
