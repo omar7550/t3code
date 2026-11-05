@@ -25,6 +25,21 @@ export const FinderIcon: Icon = (props) => (
   </svg>
 );
 
+export const SafariIcon: Icon = (props) => (
+  <svg viewBox="0 0 24 24" fill="none" {...props}>
+    <circle cx="12" cy="12" r="10.5" fill="#1D8BF1" />
+    <circle cx="12" cy="12" r="8.75" fill="#F7FBFF" />
+    <path
+      d="M12 4.5v1.75M12 17.75v1.75M4.5 12h1.75M17.75 12h1.75"
+      stroke="#9AA9B8"
+      strokeWidth="1"
+      strokeLinecap="round"
+    />
+    <path d="M17 7 13.13 13.13 10.87 10.87Z" fill="#FF3B30" />
+    <path d="M7 17 10.87 10.87 13.13 13.13Z" fill="#8E9BA8" />
+  </svg>
+);
+
 export const FileExplorerIcon: Icon = (props) => (
   <svg viewBox="0 0 24 24" fill="none" {...props}>
     <path

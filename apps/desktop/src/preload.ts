@@ -202,6 +202,7 @@ contextBridge.exposeInMainWorld("desktopBridge", {
   openSystemSettings: (pane: string) =>
     ipcRenderer.invoke(IpcChannels.OPEN_SYSTEM_SETTINGS_CHANNEL, pane),
   probeRemoteEditors: () => ipcRenderer.invoke(IpcChannels.PROBE_REMOTE_EDITORS_CHANNEL, undefined),
+  openFile: (input) => ipcRenderer.invoke(IpcChannels.OPEN_FILE_CHANNEL, input),
   pasteAsText: () => ipcRenderer.invoke(IpcChannels.PASTE_AS_TEXT_CHANNEL, undefined),
   onMenuAction: (listener) => {
     const wrappedListener = (_event: Electron.IpcRendererEvent, action: unknown) => {

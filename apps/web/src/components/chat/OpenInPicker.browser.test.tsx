@@ -65,7 +65,7 @@ vi.mock(import("../../remoteOpen"), async (importOriginal) => ({
   openRemoteEditorUrl: state.openUrl,
 }));
 
-import { OpenInPicker } from "./OpenInPicker";
+import { OpenInPicker, type OpenInPickerHtmlFile } from "./OpenInPicker";
 import {
   registerOpenFavoriteEditorCommand,
   useOpenFavoriteEditorShortcut,
@@ -98,7 +98,15 @@ async function setup() {
   async function renderPicker(
     availableEditors: readonly EditorId[] = editors,
     panel = false,
-    { openInCwd = "/work/project", revealFileManager = false } = {},
+    {
+      openInCwd = "/work/project",
+      revealFileManager = false,
+      htmlFile,
+    }: {
+      openInCwd?: string;
+      revealFileManager?: boolean;
+      htmlFile?: OpenInPickerHtmlFile;
+    } = {},
   ) {
     await act(async () => {
       for (const listener of state.listeners) listener();
@@ -109,6 +117,7 @@ async function setup() {
           availableEditors={availableEditors}
           openInCwd={openInCwd}
           revealFileManager={revealFileManager}
+          htmlFile={htmlFile}
           displayMode={panel ? "panel" : "toolbar"}
           compact={!panel}
         />
@@ -219,5 +228,36 @@ describe("open in editor announcement", () => {
     expect(await spoken()).toBe("");
     await pressOpenFavorite();
     expect(await spoken()).toBe("Opened in VS Code");
+  });
+});
+
+describe("HTML files", () => {
+  it("open in the system browser first, then offer reveal and the editors, even without host access", async () => {
+    await using fixture = await setup();
+    const { renderPicker, byLabel, menuItems, click } = fixture;
+    state.remote = { mode: "remote-links", host: { kind: "ssh-alias", host: "devbox" } };
+    const open = vi.fn((_action: string) => Promise.resolve(true));
+    await renderPicker(["vscode", "file-manager"], false, {
+      openInCwd: "/home/me/site/index.html",
+      htmlFile: { browserLabel: "Browser", revealLabel: "Reveal in Files", canReveal: true, open },
+    });
+
+    await click(byLabel("Open in Browser"));
+    expect(open.mock.calls).toEqual([["browser"]]);
+
+    await click(byLabel("More ways to open"));
+    // Finder/Files is the reveal item, so the file-manager editor is not listed again.
+    await vi.waitFor(() =>
+      expect(menuItems().map((item) => item.textContent)).toEqual([
+        expect.stringMatching(/^Browser/),
+        "Reveal in Files",
+        expect.stringMatching(/^VS Code/),
+        "Opens over SSH. Needs your key on Test host",
+      ]),
+    );
+    const reveal = menuItems()[1];
+
+    await click(reveal!);
+    expect(open.mock.calls.at(-1)).toEqual(["reveal"]);
   });
 });

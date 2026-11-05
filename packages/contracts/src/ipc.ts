@@ -1002,6 +1002,32 @@ export const DesktopPreviewRecordingSaveInputSchema = Schema.Struct({
 export const SystemSettingsPaneSchema = Schema.Literals(["full-disk-access"]);
 export type SystemSettingsPane = typeof SystemSettingsPaneSchema.Type;
 
+/** Bytes cap for copying a remote environment's file onto this machine to open it. */
+export const DESKTOP_OPEN_FILE_COPY_MAX_BYTES = 200 * 1024 * 1024;
+
+export const DesktopOpenFileActionSchema = Schema.Literals(["browser", "reveal"]);
+export type DesktopOpenFileAction = typeof DesktopOpenFileActionSchema.Type;
+
+/**
+ * `local` opens `path` on this machine. `copy` writes `bytes` into the desktop's cache under the
+ * environment and path first, for files that live on another machine.
+ */
+export const DesktopOpenFileInputSchema = Schema.Struct({
+  action: DesktopOpenFileActionSchema,
+  path: TrimmedNonEmptyString.check(Schema.isMaxLength(4096)),
+  source: Schema.Union([
+    Schema.TaggedStruct("local", {}),
+    Schema.TaggedStruct("copy", {
+      environmentId: EnvironmentId,
+      bytes: Schema.Uint8Array,
+    }),
+  ]),
+});
+export type DesktopOpenFileInput = typeof DesktopOpenFileInputSchema.Type;
+
+export const DesktopOpenFileResultSchema = Schema.Literals(["opened", "missing", "failed"]);
+export type DesktopOpenFileResult = typeof DesktopOpenFileResultSchema.Type;
+
 export interface DesktopBridge {
   getAppBranding: () => DesktopAppBranding | null;
   getRelayTelemetryEnabled: () => boolean;
@@ -1088,6 +1114,8 @@ export interface DesktopBridge {
   openSystemSettings: (pane: SystemSettingsPane) => Promise<boolean>;
   checkSystemPermission: (pane: SystemSettingsPane) => Promise<boolean>;
   probeRemoteEditors: () => Promise<readonly EditorId[]>;
+  /** Missing on desktop builds older than the client. */
+  openFile?: (input: DesktopOpenFileInput) => Promise<DesktopOpenFileResult>;
   pasteAsText: () => Promise<void>;
   onMenuAction: (listener: (action: string) => void) => () => void;
   onSnapShotEvent: (listener: (event: DesktopSnapShotEvent) => void) => () => void;

@@ -8,6 +8,7 @@ import FileBrowserPanel from "./FileBrowserPanel";
 const entries: readonly ProjectEntry[] = [
   { path: "src", kind: "directory" },
   { path: "README.md", kind: "file" },
+  { path: "report.html", kind: "file" },
 ];
 const loadingDirectories: ReadonlySet<string> = new Set();
 const directory = {
@@ -75,5 +76,35 @@ describe("FileBrowserPanel", () => {
 
     row.click();
     await vi.waitFor(() => expect(onOpenFile).toHaveBeenCalledTimes(1));
+  });
+
+  it("double-clicking an HTML file opens it in the system browser; other rows do nothing", async () => {
+    const open = vi.fn(() => Promise.resolve(true));
+    await using _screen = await render(
+      <FileBrowserPanel
+        environmentId={EnvironmentId.make("env-files")}
+        cwd="/repo"
+        projectName="repo"
+        selectedPath={null}
+        selectedPathRevealId={0}
+        onOpenFile={() => {}}
+        htmlFile={{
+          browserLabel: "Safari",
+          revealLabel: "Reveal in Finder",
+          canReveal: true,
+          open,
+        }}
+        workspaceMutationId={null}
+      />,
+    );
+    await vi.waitFor(() => expect(findTreeRow("report.html")).not.toBeNull());
+    const doubleClick = (row: HTMLElement) =>
+      row.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, composed: true }));
+
+    doubleClick(findTreeRow("src/")!);
+    doubleClick(findTreeRow("README.md")!);
+    doubleClick(findTreeRow("report.html")!);
+
+    expect(open.mock.calls).toEqual([["browser", "report.html"]]);
   });
 });

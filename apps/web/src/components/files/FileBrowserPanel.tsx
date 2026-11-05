@@ -3,7 +3,7 @@ import type {
   ContextMenuItem as TreeContextMenuItem,
   ContextMenuOpenContext as TreeContextMenuOpenContext,
 } from "@pierre/trees";
-import type { EnvironmentId, ProjectEntry } from "@t3tools/contracts";
+import type { DesktopOpenFileAction, EnvironmentId, ProjectEntry } from "@t3tools/contracts";
 import { FileTree, useFileTree, useFileTreeSearch, useFileTreeSelector } from "@pierre/trees/react";
 import { settlePromise } from "@t3tools/client-runtime/state/runtime";
 import { serializeComposerFileLink } from "@t3tools/shared/composerTrigger";
@@ -23,6 +23,7 @@ import { useStableCallback } from "~/hooks/useStableCallback";
 import { useTheme } from "~/hooks/useTheme";
 import { useWorkspaceMutationRefresh } from "~/hooks/useWorkspaceMutationRefresh";
 import { useFileContextMenu, type FileContextMenuAction } from "~/fileContextMenu";
+import { isHtmlFilePath } from "~/htmlFileOpen";
 import { readLocalApi } from "~/localApi";
 import { T3_PIERRE_ICONS } from "~/pierre-icons";
 import { PIERRE_TREE_UNSAFE_CSS, pierreTreeStyle } from "~/pierre-tree-theme";
@@ -35,6 +36,14 @@ import { loadFileAncestors } from "./loadFileAncestors";
 import { useDirectoryEntries } from "./useDirectoryEntries";
 import { useProjectPathSearch } from "~/state/queries";
 
+export interface FileBrowserHtmlFile {
+  readonly browserLabel: string;
+  readonly revealLabel: string;
+  readonly canReveal: boolean;
+  /** Receives the same path as `onOpenFile`. */
+  readonly open: (action: DesktopOpenFileAction, path: string) => Promise<boolean>;
+}
+
 interface FileBrowserPanelProps {
   environmentId: EnvironmentId;
   cwd: string;
@@ -42,11 +51,24 @@ interface FileBrowserPanelProps {
   selectedPath: string | null;
   selectedPathRevealId: number;
   onOpenFile: (relativePath: string) => void;
+  /** HTML files open in the system browser on double-click and from the context menu. */
+  htmlFile?: FileBrowserHtmlFile | undefined;
   /** Host-folder entries use absolute paths. Avoid full traversal: disable expand-all and search only
    * loaded folders. */
   hostFolder?: boolean;
   onRefreshSelectedFile?: () => void;
   workspaceMutationId: string | null;
+}
+
+/** The file row a pointer event hit, read across the tree's shadow root. */
+function fileTreeRowFilePath(eventPath: ReadonlyArray<EventTarget>): string | null {
+  for (const target of eventPath) {
+    if (!(target instanceof HTMLElement)) continue;
+    const path = target.dataset.itemPath;
+    if (path === undefined) continue;
+    return target.dataset.itemType === "file" ? path.replace(/\/$/, "") : null;
+  }
+  return null;
 }
 
 function treePath(entry: ProjectEntry): string {
@@ -140,6 +162,7 @@ export default function FileBrowserPanel({
   selectedPath,
   selectedPathRevealId,
   onOpenFile,
+  htmlFile,
   onRefreshSelectedFile,
   workspaceMutationId,
   hostFolder = false,
@@ -192,16 +215,38 @@ export default function FileBrowserPanel({
         : { x: anchorRect.left, y: anchorRect.bottom };
       const fileTarget = { environmentId, filePath: relativePath, workspaceRoot: cwd };
       const fileMenuItems = fileContextMenu.buildItems(fileTarget);
+      const htmlActions =
+        htmlFile && !item.path.endsWith("/") && isHtmlFilePath(relativePath) ? htmlFile : undefined;
       void settlePromise(async () => {
         const clicked = await api.contextMenu.show(
           [
-            ...fileMenuItems,
+            ...(htmlActions
+              ? [
+                  {
+                    id: "open-in-system-browser",
+                    label: `Open in ${htmlActions.browserLabel}`,
+                  },
+                  ...(htmlActions.canReveal
+                    ? [{ id: "reveal-copy", label: htmlActions.revealLabel }]
+                    : []),
+                ]
+              : []),
+            ...fileMenuItems.filter(
+              (entry) => !(htmlActions?.canReveal && entry.id === "reveal-in-folder"),
+            ),
             { id: "copy-mention", label: "Copy mention" },
             { id: "add-to-chat", label: "Add to chat" },
           ],
           position,
         );
         if (clicked === null) return;
+        if (htmlActions && (clicked === "open-in-system-browser" || clicked === "reveal-copy")) {
+          await htmlActions.open(
+            clicked === "reveal-copy" ? "reveal" : "browser",
+            panelPath(relativePath),
+          );
+          return;
+        }
         // Open-with submenu ids are absent from the top-level item list.
         const isFileMenuAction =
           fileMenuItems.some((entry) => entry.id === clicked) || clicked.startsWith("editor:");
@@ -482,6 +527,13 @@ export default function FileBrowserPanel({
       // Capture dragstart before the tree selects the row so selection sees the drag flag.
       onDragStartCapture={(event) => dragMention.handleDragStart(event.nativeEvent)}
       onDragEnd={() => dragMention.handleDragEnd((path) => model.getItem(path)?.deselect())}
+      onDoubleClick={(event) => {
+        if (!htmlFile) return;
+        const relativePath = fileTreeRowFilePath(event.nativeEvent.composedPath());
+        if (relativePath !== null && isHtmlFilePath(relativePath)) {
+          void htmlFile.open("browser", panelPath(relativePath));
+        }
+      }}
     >
       <div
         className="flex h-10 min-h-10 shrink-0 items-center gap-1 border-b border-border/60 bg-background px-2 in-data-[preview-panel-mode=inline]:mb-1 in-data-[preview-panel-mode=inline]:h-9 in-data-[preview-panel-mode=inline]:min-h-9 in-data-[preview-panel-mode=inline]:border-b-transparent"

@@ -2,6 +2,7 @@ import { ThreadDetailsControl } from "./ThreadDetailsControl";
 import {
   AuthOrchestrationOperateScope,
   buildRemoteOpenUrl,
+  type DesktopOpenFileAction,
   EditorId,
   type EnvironmentId,
   type ResolvedKeybindingsConfig,
@@ -19,7 +20,12 @@ import {
   useRemoteOpenState,
 } from "../../remoteOpen";
 import { useEnvironment } from "../../state/environments";
-import { ChevronDownIcon, FolderClosedIcon, SquareArrowOutUpRightIcon } from "lucide-react";
+import {
+  ChevronDownIcon,
+  FolderClosedIcon,
+  Globe2Icon,
+  SquareArrowOutUpRightIcon,
+} from "lucide-react";
 
 import { Group, GroupSeparator } from "../ui/group";
 import {
@@ -27,6 +33,7 @@ import {
   MenuItem,
   MenuItemLabel,
   MenuPopup,
+  MenuSeparator,
   MenuShortcut,
   MenuSub,
   MenuSubTrigger,
@@ -40,6 +47,7 @@ import {
   FinderIcon,
   Icon,
   KiroIcon,
+  SafariIcon,
   TraeIcon,
   VisualStudioCode,
   VisualStudioCodeInsiders,
@@ -199,6 +207,26 @@ const resolveOpenInOptions = (platform: string, availableEditors: ReadonlyArray<
     .map((option) => ({ ...option, label: editorLabelForPlatform(option.value, platform) }));
 };
 
+/** HTML files open in the system browser by default; editors move into the menu. */
+export interface OpenInPickerHtmlFile {
+  readonly browserLabel: string;
+  readonly revealLabel: string;
+  readonly canReveal: boolean;
+  readonly open: (action: DesktopOpenFileAction) => Promise<boolean>;
+}
+
+function systemBrowserIcon(platform: string): { Icon: Icon; kind: OpenInOption["kind"] } {
+  return isMacPlatform(platform)
+    ? { Icon: SafariIcon, kind: "brand" }
+    : { Icon: Globe2Icon, kind: "generic" };
+}
+
+function fileManagerIcon(platform: string): { Icon: Icon; kind: OpenInOption["kind"] } {
+  if (isMacPlatform(platform)) return { Icon: FinderIcon, kind: "brand" };
+  if (isWindowsPlatform(platform)) return { Icon: FileExplorerIcon, kind: "brand" };
+  return { Icon: FolderClosedIcon, kind: "generic" };
+}
+
 function getOpenInIconClass(kind: OpenInOption["kind"]) {
   return cn(kind === "brand" ? "text-foreground opacity-100" : "text-muted-foreground");
 }
@@ -214,6 +242,7 @@ export const OpenInPicker = memo(function OpenInPicker({
   enableShortcut = true,
   displayMode = "toolbar",
   revealFileManager = false,
+  htmlFile,
 }: {
   environmentId: EnvironmentId;
   keybindings: ResolvedKeybindingsConfig;
@@ -225,6 +254,7 @@ export const OpenInPicker = memo(function OpenInPicker({
   enableShortcut?: boolean;
   displayMode?: "toolbar" | "panel";
   revealFileManager?: boolean;
+  htmlFile?: OpenInPickerHtmlFile | undefined;
 }) {
   const isPanel = displayMode === "panel";
   const ActionGroup = isPanel ? "div" : Group;
@@ -299,13 +329,16 @@ export const OpenInPicker = memo(function OpenInPicker({
               No installed editors found
             </MenuItem>
           )}
-          {options.map(({ label, Icon, value, kind }) => (
+          {(htmlFile?.canReveal
+            ? options.filter(({ value }) => value !== "file-manager")
+            : options
+          ).map(({ label, Icon, value, kind }) => (
             <MenuItem
               density={presentation === "menu" ? "touch" : "default"}
               disabled={!openInCwd || !canOpenEditor}
               key={value}
               onClick={() => {
-                if (presentation === "menu") {
+                if (presentation === "menu" || htmlFile) {
                   void openInEditor(value);
                 } else {
                   setPreferredEditor(value);
@@ -356,6 +389,40 @@ export const OpenInPicker = memo(function OpenInPicker({
     );
   }
 
+  const browserIcon = systemBrowserIcon(navigator.platform);
+  const managerIcon = fileManagerIcon(navigator.platform);
+  const openHtmlFile = (action: DesktopOpenFileAction) => {
+    if (!htmlFile) return;
+    void htmlFile.open(action).then((opened) => {
+      if (!opened) return;
+      announce(action === "reveal" ? htmlFile.revealLabel : `Opened in ${htmlFile.browserLabel}`);
+    });
+  };
+  const menuContent = htmlFile ? (
+    <>
+      <MenuItem onClick={() => openHtmlFile("browser")}>
+        <browserIcon.Icon aria-hidden="true" className={getOpenInIconClass(browserIcon.kind)} />
+        <MenuItemLabel>{htmlFile.browserLabel}</MenuItemLabel>
+        {openFavoriteEditorShortcutLabel && (
+          <MenuShortcut>{openFavoriteEditorShortcutLabel}</MenuShortcut>
+        )}
+      </MenuItem>
+      {htmlFile.canReveal && (
+        <MenuItem onClick={() => openHtmlFile("reveal")}>
+          <managerIcon.Icon aria-hidden="true" className={getOpenInIconClass(managerIcon.kind)} />
+          <MenuItemLabel>{htmlFile.revealLabel}</MenuItemLabel>
+        </MenuItem>
+      )}
+      <MenuSeparator />
+      {editorItems}
+    </>
+  ) : (
+    editorItems
+  );
+  const PrimaryIcon = htmlFile ? browserIcon.Icon : primaryOption?.Icon;
+  const primaryIconKind = htmlFile ? browserIcon.kind : primaryOption?.kind;
+  const primaryText = htmlFile ? `Open in ${htmlFile.browserLabel}` : primaryLabel;
+
   return (
     <ActionGroup
       aria-label="Open in editor"
@@ -365,14 +432,20 @@ export const OpenInPicker = memo(function OpenInPicker({
         : {})}
     >
       <ThreadDetailsControl
-        aria-label={compact ? "Open file in preferred editor" : primaryLabel}
+        aria-label={
+          htmlFile ? primaryText : compact ? "Open file in preferred editor" : primaryLabel
+        }
         size={isPanel ? "sm" : "xs"}
         variant={isPanel ? "ghost" : "outline"}
         part="primary"
         panel={isPanel}
-        disabled={!preferredEditor || !openInCwd || !canOpenEditor}
+        disabled={htmlFile ? false : !preferredEditor || !openInCwd || !canOpenEditor}
         {...(enableShortcut && !backgroundThread ? { [OPEN_FAVORITE_EDITOR_ATTRIBUTE]: "" } : {})}
         onClick={() => {
+          if (htmlFile) {
+            openHtmlFile("browser");
+            return;
+          }
           if (!preferredEditor) return;
           const label = editorLabelForPlatform(preferredEditor, navigator.platform);
           void openInEditor(preferredEditor).then((opened) => {
@@ -380,12 +453,12 @@ export const OpenInPicker = memo(function OpenInPicker({
           });
         }}
       >
-        {primaryOption?.Icon ? (
-          <primaryOption.Icon
+        {PrimaryIcon && primaryIconKind ? (
+          <PrimaryIcon
             aria-hidden="true"
             className={cn(
               isPanel ? THREAD_DETAILS_PANEL_ICON_CLASS : "size-3.5",
-              getOpenInIconClass(primaryOption.kind),
+              getOpenInIconClass(primaryIconKind),
             )}
           />
         ) : isPanel ? (
@@ -402,7 +475,7 @@ export const OpenInPicker = memo(function OpenInPicker({
             isPanel && cn("not-sr-only ml-0 min-w-0 truncate", THREAD_DETAILS_PANEL_LABEL_CLASS),
           )}
         >
-          {primaryLabel}
+          {primaryText}
         </span>
       </ThreadDetailsControl>
       {isPanel ? (
@@ -412,10 +485,10 @@ export const OpenInPicker = memo(function OpenInPicker({
       )}
       <Menu open={menuOpen} onOpenChange={setMenuOpen}>
         <MenuTrigger
-          disabled={isHostEditorDenied}
+          disabled={isHostEditorDenied && !htmlFile}
           render={
             <ThreadDetailsControl
-              aria-label="Choose editor"
+              aria-label={htmlFile ? "More ways to open" : "Choose editor"}
               size={isPanel ? "sm" : "icon-xs"}
               variant={isPanel ? "ghost" : "outline"}
               part="secondary"
@@ -433,7 +506,7 @@ export const OpenInPicker = memo(function OpenInPicker({
           {...(isPanel ? { anchor: panelAnchorRef } : {})}
           className={isPanel ? "w-(--anchor-width)" : undefined}
         >
-          {editorItems}
+          {menuContent}
         </MenuPopup>
       </Menu>
     </ActionGroup>

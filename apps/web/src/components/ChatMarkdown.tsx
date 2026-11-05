@@ -185,6 +185,7 @@ import {
   BrowserPreviewUnavailableError,
   BrowserSettingsReadError,
 } from "../browser/openFileInPreview";
+import { isHtmlFilePath, useHtmlFileOpener } from "~/htmlFileOpen";
 import { resolveLinkTarget } from "../browser/browserLinkTarget";
 import { PullRequestLinkPreview } from "./pullRequest/PullRequestLinkPreview";
 import { MarkdownCodeBlock, SuspenseShikiCodeBlock } from "./chat/MarkdownCodeBlock";
@@ -505,6 +506,7 @@ function useChatMarkdownState({
   const canOperateHost = useEnvironmentScope(environmentId, AuthOrchestrationOperateScope);
   const canOperatePreview = useEnvironmentScope(environmentId, AuthPreviewOperateScope);
   const remoteOpen = useRemoteOpenResolution(environmentId);
+  const htmlFileOpener = useHtmlFileOpener(environmentId);
   const canUseShellActions =
     canOperateHost &&
     canUseMarkdownFileShellActions(environmentId, remoteOpen.state.mode, remoteOpen.isResolved);
@@ -862,6 +864,21 @@ function useChatMarkdownState({
             : undefined
         }
         revealLabel={revealInFileManagerLabel}
+        htmlFile={
+          cwd && htmlFileOpener.canOpen && isHtmlFilePath(fileLinkMeta.filePath)
+            ? {
+                browserLabel: htmlFileOpener.browserLabel,
+                revealLabel: htmlFileOpener.revealLabel,
+                canReveal: htmlFileOpener.canReveal,
+                open: async (action) =>
+                  htmlFileOpener.open(action, {
+                    absolutePath: (await resolveHostPath()).absolutePath,
+                    workspaceRoot: cwd,
+                    threadRef: threadRef ?? null,
+                  }),
+              }
+            : undefined
+        }
         onOpenInBrowser={
           threadRef &&
           canOperatePreview &&

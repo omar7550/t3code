@@ -16,6 +16,7 @@ import { ContextChip } from "../ContextChip";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { FileTagChipContent } from "./FileTagChip";
+import type { OpenInPickerHtmlFile } from "./OpenInPicker";
 import {
   hasMarkdownFilePrimaryAction,
   markdownFileCopyMenuItems,
@@ -44,6 +45,8 @@ interface MarkdownFileLinkProps {
   onOpenMedia?: (() => void) | undefined;
   onReveal?: (() => Promise<AtomCommandResult<unknown, unknown>>) | undefined;
   revealLabel?: string | undefined;
+  /** HTML links also open in the system browser, by double-click or from the menu. */
+  htmlFile?: OpenInPickerHtmlFile | undefined;
 }
 
 const MARKDOWN_FILE_LINK_CLASS_NAME = "chat-markdown-file-link";
@@ -67,6 +70,7 @@ export const MarkdownFileLink = memo(function MarkdownFileLink({
   onOpenMedia,
   onReveal,
   revealLabel,
+  htmlFile,
   resolveCopyPaths,
 }: MarkdownFileLinkProps) {
   const handleOpenInEditor = () => {
@@ -249,17 +253,29 @@ export const MarkdownFileLink = memo(function MarkdownFileLink({
       const copyItems = markdownFileCopyMenuItems({ targetPath, workspaceRelativePath });
       const clicked = await api.contextMenu.show(
         [
+          ...(htmlFile
+            ? ([
+                { id: "open-in-system-browser", label: `Open in ${htmlFile.browserLabel}` },
+              ] as const)
+            : []),
           ...(onOpenMedia ? ([{ id: "preview-media", label: "Preview media" }] as const) : []),
           ...(onOpen ? ([{ id: "open", label: openInEditorMenuLabel }] as const) : []),
           ...(onOpenInBrowser
             ? ([{ id: "open-in-browser", label: "Open in integrated browser" }] as const)
             : []),
           ...(onReveal && revealLabel ? ([{ id: "reveal", label: revealLabel }] as const) : []),
+          ...(htmlFile?.canReveal && !(onReveal && revealLabel)
+            ? ([{ id: "reveal-copy", label: htmlFile.revealLabel }] as const)
+            : []),
           ...copyItems.map(({ id, label }) => ({ id, label })),
         ] as const,
         position,
       );
 
+      if (clicked === "open-in-system-browser" || clicked === "reveal-copy") {
+        void htmlFile?.open(clicked === "reveal-copy" ? "reveal" : "browser");
+        return;
+      }
       if (clicked === "preview-media") {
         onOpenMedia?.();
         return;
@@ -337,6 +353,8 @@ export const MarkdownFileLink = memo(function MarkdownFileLink({
               onClick={(event) => {
                 event.preventDefault();
                 event.stopPropagation();
+                // The second click of a double-click belongs to onDoubleClick.
+                if (htmlFile && event.detail > 1) return;
                 if (onOpen && shouldOpenMarkdownFileLinkInEditor(event)) {
                   handleOpenInEditor();
                   return;
@@ -348,6 +366,15 @@ export const MarkdownFileLink = memo(function MarkdownFileLink({
                 handleOpenInFilePreview();
               }}
               onContextMenu={handleContextMenu}
+              {...(htmlFile
+                ? {
+                    onDoubleClick: (event: ReactMouseEvent<HTMLElement>) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      void htmlFile.open("browser");
+                    },
+                  }
+                : {})}
             >
               <FileTagChipContent
                 path={iconPath}
@@ -410,6 +437,7 @@ function areMarkdownFileLinkPropsEqual(
     previous.onOpenMedia === next.onOpenMedia &&
     previous.onReveal === next.onReveal &&
     previous.resolveCopyPaths === next.resolveCopyPaths &&
-    previous.revealLabel === next.revealLabel
+    previous.revealLabel === next.revealLabel &&
+    previous.htmlFile === next.htmlFile
   );
 }

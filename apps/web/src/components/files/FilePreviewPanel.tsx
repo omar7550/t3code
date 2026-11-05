@@ -119,6 +119,8 @@ import {
 } from "./filePreviewMode";
 import { changeFileSaveSession, useFileSaveSession } from "./fileSaveSessions";
 import { revisionedQuery } from "~/state/revisionedQuery";
+import { isHtmlFilePath, useHtmlFileOpener } from "~/htmlFileOpen";
+import type { OpenInPickerHtmlFile } from "~/components/chat/OpenInPicker";
 import {
   getOptimisticProjectFileQueryData,
   getProjectFileContents,
@@ -1151,6 +1153,22 @@ export default function FilePreviewPanel({
       : relativePath && attachment === undefined
         ? resolvePathLinkTarget(relativePath, cwd)
         : null;
+  const htmlFileOpener = useHtmlFileOpener(environmentId);
+  const openHtmlFile = (action: "browser" | "reveal", filePath: string) =>
+    htmlFileOpener.open(action, {
+      absolutePath: resolvePathLinkTarget(filePath, cwd),
+      workspaceRoot: cwd,
+      threadRef: draft ? null : threadRef,
+    });
+  const htmlFile: OpenInPickerHtmlFile | undefined =
+    absolutePath !== null && !isFolder && isHtmlFilePath(absolutePath) && htmlFileOpener.canOpen
+      ? {
+          browserLabel: htmlFileOpener.browserLabel,
+          revealLabel: htmlFileOpener.revealLabel,
+          canReveal: htmlFileOpener.canReveal,
+          open: (action) => openHtmlFile(action, absolutePath),
+        }
+      : undefined;
   const onFilePostRender = useFileLineReveal(relativePath, revealLine, revealRequestId);
   // Mounting the file read under the workspace mutation id refetches it after each mutation.
   useAtomMount(
@@ -1257,7 +1275,9 @@ export default function FilePreviewPanel({
             </div>
           </ScrollArea>
           {absolutePath &&
-          (environmentId === primaryEnvironmentId || remoteOpenState.mode !== "local-exec") ? (
+          (htmlFile !== undefined ||
+            environmentId === primaryEnvironmentId ||
+            remoteOpenState.mode !== "local-exec") ? (
             <OpenInPicker
               environmentId={environmentId}
               keybindings={keybindings}
@@ -1267,6 +1287,7 @@ export default function FilePreviewPanel({
               openInCwdIsFile={file.isFile}
               compact
               revealFileManager={revealsInFileManager}
+              htmlFile={htmlFile}
             />
           ) : null}
           {canToggleRendered && renderedMode ? (
@@ -1534,6 +1555,16 @@ export default function FilePreviewPanel({
               }
               selectedPathRevealId={revealRequestId}
               onOpenFile={onOpenFile}
+              htmlFile={
+                htmlFileOpener.canOpen
+                  ? {
+                      browserLabel: htmlFileOpener.browserLabel,
+                      revealLabel: htmlFileOpener.revealLabel,
+                      canReveal: htmlFileOpener.canReveal,
+                      open: openHtmlFile,
+                    }
+                  : undefined
+              }
               workspaceMutationId={workspaceMutationId}
               {...(previewPath && !isMedia && !isPdf
                 ? {
