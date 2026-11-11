@@ -10,7 +10,10 @@ import {
 } from "@t3tools/client-runtime/state/thread-settled";
 import type { SnoozePreset } from "@t3tools/client-runtime/state/thread-settled";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
-import { resolveThreadProviderStack } from "@t3tools/client-runtime/state/models";
+import {
+  resolveThreadProviderStack,
+  threadOwnsRunningBackgroundWork,
+} from "@t3tools/client-runtime/state/models";
 import {
   threadSearchMatchKey,
   threadSearchSubject,
@@ -207,7 +210,8 @@ export function resolveThreadListV2Status(
     | "pendingGuestMessageCount"
     | "runtime"
     | "blockedOnThreadWait"
-  >,
+  > &
+    Partial<Pick<EnvironmentThreadShell, "pendingBackgroundTasks">>,
 ): ThreadListV2Status {
   if (thread.hasPendingApprovals || thread.pendingSubagentRequest === "approval") {
     return "approval";
@@ -234,6 +238,8 @@ export function resolveThreadListV2Status(
   if (thread.runtime?.status === "failed") {
     return thread.runtime.lastErrorClass === "usage_limit" ? "limited" : "failed";
   }
+  // The turn ended while background work it owns still runs.
+  if (threadOwnsRunningBackgroundWork(thread)) return "waiting";
   return "ready";
 }
 

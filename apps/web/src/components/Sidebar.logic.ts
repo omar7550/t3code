@@ -1,6 +1,8 @@
-import { resolveThreadWorkingStartedAt } from "@t3tools/client-runtime/state/models";
+import {
+  resolveThreadWorkingStartedAt,
+  threadOwnsRunningBackgroundWork,
+} from "@t3tools/client-runtime/state/models";
 import { isShownUnderParent } from "@t3tools/client-runtime/state/threads";
-import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import { threadPullRequestSearchTerms } from "@t3tools/shared/threadPullRequests";
 import * as React from "react";
 import {
@@ -841,9 +843,24 @@ type SidebarThreadStatusInput = Pick<
   | "pendingGuestMessageCount"
   | "runtime"
   | "blockedOnThreadWait"
->;
+> &
+  Partial<Pick<SidebarThreadSummary, "pendingBackgroundTasks">>;
 
+/**
+ * A row's status: the run's own status, except that a thread whose turn ended
+ * while background work it owns is still running reads as Waiting.
+ */
 export function resolveSidebarThreadStatus(thread: SidebarThreadStatusInput): SidebarThreadStatus {
+  const status = resolveSidebarRunStatus(thread);
+  return status === "ready" && threadOwnsRunningBackgroundWork(thread) ? "waiting" : status;
+}
+
+/**
+ * The run's own status, ignoring background work the agent does not wait on,
+ * such as a dev server. Notifications follow it, so a finished turn still
+ * notifies while such work runs.
+ */
+export function resolveSidebarRunStatus(thread: SidebarThreadStatusInput): SidebarThreadStatus {
   if (thread.hasPendingApprovals || thread.pendingSubagentRequest === "approval") {
     return "approval";
   }
@@ -1129,7 +1146,7 @@ export function resolveThreadStatusPill(input: {
 
   if (
     (thread.runtime?.status === "running" && thread.blockedOnThreadWait === true) ||
-    backgroundWorkHoldsCompletion(thread.pendingBackgroundTasks ?? [])
+    threadOwnsRunningBackgroundWork(thread)
   ) {
     return {
       label: "Waiting",
