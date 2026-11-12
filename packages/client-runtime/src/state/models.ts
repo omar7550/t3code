@@ -115,6 +115,18 @@ export function threadRuntimeIsActive(runtime: ThreadStructureRuntime | null | u
   return runtime !== null && runtime !== undefined && threadRunStatusIsActive(runtime.status);
 }
 
+/**
+ * Whether the thread still owns running background work: a command, monitor,
+ * background task or subagent, awaited or not. Lists keep such a thread in
+ * Working as Waiting until it all ends; a failed run does not hold.
+ */
+export function threadOwnsRunningBackgroundWork(thread: {
+  readonly pendingBackgroundTasks?: ReadonlyArray<unknown> | undefined;
+  readonly runtime: Pick<ThreadStructureRuntime, "status"> | null;
+}): boolean {
+  return (thread.pendingBackgroundTasks?.length ?? 0) > 0 && thread.runtime?.status !== "failed";
+}
+
 export function threadRuntimeCanArchive(runtime: ThreadRuntimeSummary | null | undefined): boolean {
   if (runtime?.status === "queued") return runtime.activeRunId === null;
   return (

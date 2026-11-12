@@ -34,6 +34,45 @@ function thread(id: string, working: boolean) {
   };
 }
 
+describe("isThreadWorking", () => {
+  const command = {
+    taskId: "deploy",
+    description: "Wait for the deploy",
+    kind: "command" as const,
+  };
+
+  it("keeps a thread whose turn ended with background work still running", () => {
+    expect(isThreadWorking({ ...thread("a", false), pendingBackgroundTasks: [command] })).toBe(
+      true,
+    );
+    expect(
+      isThreadWorking({
+        ...thread("a", false),
+        pendingBackgroundTasks: [{ ...command, kind: "subagent" as const }],
+      }),
+    ).toBe(true);
+    expect(isThreadWorking({ ...thread("a", false), pendingBackgroundTasks: [] })).toBe(false);
+  });
+
+  it("does not hold a failed thread or one asking for approval", () => {
+    const failed = thread("a", true);
+    expect(
+      isThreadWorking({
+        ...failed,
+        runtime: { ...failed.runtime!, status: "failed" as const },
+        pendingBackgroundTasks: [command],
+      }),
+    ).toBe(false);
+    expect(
+      isThreadWorking({
+        ...thread("a", false),
+        hasPendingApprovals: true,
+        pendingBackgroundTasks: [command],
+      }),
+    ).toBe(false);
+  });
+});
+
 describe("createInboxReturnTracker", () => {
   beforeEach(() => {
     vi.useFakeTimers();
