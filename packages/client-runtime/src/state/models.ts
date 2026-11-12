@@ -120,11 +120,10 @@ export function threadRuntimeIsActive(runtime: ThreadStructureRuntime | null | u
  * background task or subagent, awaited or not. Lists keep such a thread in
  * Working as Waiting until it all ends; a failed run does not hold.
  */
-export function threadOwnsRunningBackgroundWork(
-  thread: Pick<Partial<EnvironmentThreadShell>, "pendingBackgroundTasks"> & {
-    readonly runtime: Pick<ThreadStructureRuntime, "status"> | null;
-  },
-): boolean {
+export function threadOwnsRunningBackgroundWork(thread: {
+  readonly pendingBackgroundTasks?: ReadonlyArray<unknown> | undefined;
+  readonly runtime: Pick<ThreadStructureRuntime, "status"> | null;
+}): boolean {
   return (thread.pendingBackgroundTasks?.length ?? 0) > 0 && thread.runtime?.status !== "failed";
 }
 
