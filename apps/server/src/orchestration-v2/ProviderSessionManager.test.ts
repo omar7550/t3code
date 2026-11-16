@@ -33,6 +33,7 @@ import { TestClock } from "effect/testing";
 import { HttpServer } from "effect/http";
 
 import { ProviderWorkspaceMissingError } from "../provider/Errors.ts";
+import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as McpProviderSession from "@t3tools/provider-core/server/mcpSession";
@@ -492,6 +493,7 @@ function layerTest(input: {
   readonly scopeCloseReached?: Deferred.Deferred<void>;
   readonly serverSettingsLayer?: ReturnType<typeof ServerSettings.layerTest>;
   readonly projectServiceLayer?: Layer.Layer<ProjectService.ProjectService>;
+  readonly baseDir?: string;
 }) {
   const layerConfiguredEventSink =
     input.flakyReleaseWrites !== undefined
@@ -574,6 +576,13 @@ function layerTest(input: {
           layerTestStores,
           ...(input.serverSettingsLayer === undefined ? [] : [input.serverSettingsLayer]),
           ...(input.projectServiceLayer === undefined ? [] : [input.projectServiceLayer]),
+          ...(input.baseDir === undefined
+            ? []
+            : [
+                Layer.succeed(ServerConfig.ServerConfig, {
+                  baseDir: input.baseDir,
+                } as ServerConfig.ServerConfig["Service"]),
+              ]),
         ),
       ),
     ),
@@ -3733,6 +3742,52 @@ it.effect.each(["missing", "file"] as const)(
           [],
         );
       }).pipe(Effect.provide(layerTest({ state, idleTimeoutMs: 60_000 })));
+    }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect.each(["scratch", "outside-scratch"] as const)(
+  "recreates a missing %s workspace only inside the scratch root",
+  (location) =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const root = yield* fileSystem.makeTempDirectoryScoped();
+      const scratchRoot = `${root}/scratch`;
+      yield* fileSystem.makeDirectory(scratchRoot);
+      const cwd =
+        location === "scratch" ? `${scratchRoot}/2026-11-07-thread-161f3ded` : `${root}/project`;
+      const state = yield* Ref.make(emptyState);
+      yield* Effect.gen(function* () {
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const eventSink = yield* EventSink.EventSinkV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const threadId = ThreadId.make(`thread-${location}-recreate`);
+        const providerSessionId = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+        yield* eventSink.write({
+          events: [
+            yield* makeThreadCreatedEvent({ idAllocator, threadId, now: yield* DateTime.now }),
+          ],
+        });
+        const result = yield* manager
+          .open({
+            threadId,
+            providerSessionId,
+            modelSelection,
+            runtimePolicy: { ...runtimePolicy, cwd },
+          })
+          .pipe(Effect.exit);
+        if (location === "scratch") {
+          assert.isTrue(Exit.isSuccess(result));
+          assert.equal((yield* fileSystem.stat(cwd)).type, "Directory");
+          assert.equal((yield* Ref.get(state)).openCount, 1);
+        } else {
+          assert.isTrue(Exit.isFailure(result));
+          assert.isFalse(yield* fileSystem.exists(cwd));
+          assert.equal((yield* Ref.get(state)).openCount, 0);
+        }
+      }).pipe(Effect.provide(layerTest({ state, idleTimeoutMs: 60_000, baseDir: root })));
     }).pipe(Effect.provide(NodeServices.layer)),
 );
 

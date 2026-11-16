@@ -25,6 +25,7 @@ import * as FiberSet from "effect/FiberSet";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schedule from "effect/Schedule";
@@ -42,6 +43,7 @@ import {
 } from "../observability/Metrics.ts";
 import { ProviderWorkspaceMissingError } from "../provider/Errors.ts";
 import * as ProjectService from "../project/ProjectService.ts";
+import * as ServerConfig from "../config.ts";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as ServerSettings from "../serverSettings.ts";
 import * as McpSessionRegistry from "../mcp/McpSessionRegistry.ts";
@@ -340,6 +342,32 @@ export const layerWithOptions = (
       /** Unreadable settings must preserve explicit browser-access opt-outs. */
       const serverSettings = yield* Effect.serviceOption(ServerSettings.ServerSettingsService);
       const projectService = yield* Effect.serviceOption(ProjectService.ProjectService);
+      const serverConfig = yield* Effect.serviceOption(ServerConfig.ServerConfig);
+      /**
+       * A scratch thread's folder is disposable and owned by T3, so cleanup may remove it while
+       * the thread lives on. Recreate it empty instead of failing the session open; any other
+       * missing workspace (projects, worktrees) still fails, since an empty folder would mislead.
+       */
+      const pathService = yield* Effect.serviceOption(Path.Path);
+      const recreateMissingScratchWorkspace = Effect.fn(
+        "ProviderSessionManagerV2.recreateMissingScratchWorkspace",
+      )(
+        function* (cwd: string) {
+          if (Option.isNone(serverConfig) || Option.isNone(pathService)) return false;
+          const path = pathService.value;
+          // Same root ManagedProjectFolders creates scratch thread folders in.
+          const scratchRoot = path.resolve(serverConfig.value.baseDir, "scratch");
+          const resolved = path.resolve(cwd);
+          if (path.dirname(resolved) !== scratchRoot) return false;
+          if (yield* fileSystem.exists(resolved)) return false;
+          yield* fileSystem.makeDirectory(resolved, { recursive: true });
+          yield* Effect.logInfo("orchestration-v2.driver-session.scratch-workspace-recreated", {
+            cwd: resolved,
+          });
+          return true;
+        },
+        Effect.orElseSucceed(() => false),
+      );
       const eventSink = yield* EventSink.EventSinkV2;
       const commandOutput = yield* CommandOutputHub.CommandOutputHub;
       const idAllocator = yield* IdAllocator.IdAllocatorV2;
@@ -2127,7 +2155,7 @@ export const layerWithOptions = (
                   Effect.map((stat) => stat.type === "Directory"),
                   Effect.catch((error) => Effect.succeed(error.reason._tag !== "NotFound")),
                 );
-                if (!workspaceIsDirectory) {
+                if (!workspaceIsDirectory && !(yield* recreateMissingScratchWorkspace(cwd))) {
                   return yield* new ProviderWorkspaceMissingError({
                     threadId: input.threadId,
                     cwd,
