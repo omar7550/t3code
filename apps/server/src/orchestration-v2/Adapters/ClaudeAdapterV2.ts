@@ -2903,6 +2903,10 @@ export const CLAUDE_READ_ONLY_T3_MCP_ALLOWED_TOOLS: ReadonlyArray<string> = [
 // The name this adapter registers T3's MCP server under, and so the one Claude gives for it.
 const CLAUDE_T3_MCP_SERVER = "t3-code";
 
+export const CLAUDE_ASYNC_QUESTIONS_ENV = "T3CODE_CLAUDE_ASYNC_QUESTIONS";
+const CLAUDE_ASYNC_QUESTION_NOTE =
+  "The user now sees this question as a card, and it stays open; this is not a rejection. Do not wait for it or ask it again. Keep doing the work that does not depend on the answer. The answer arrives later as a user message. If nothing else can be done, end your turn and say you are waiting on this question.";
+
 // request_secret can wait an hour; exceed Claude's default 60 s timeout.
 export const CLAUDE_T3_MCP_TOOL_TIMEOUT_MS = 65 * 60 * 1_000;
 
@@ -13405,6 +13409,8 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           yield* handleRoutedSdkMessage(input);
         });
 
+        // Opt-in: a question shows its card and the agent keeps working; the answer arrives as a message.
+        const asyncQuestions = adapterOptions.environment[CLAUDE_ASYNC_QUESTIONS_ENV] === "1";
         const canUseToolEffect = Effect.fn("ClaudeAdapterV2.canUseTool")(function* (
           toolName: Parameters<CanUseTool>[0],
           toolInput: Parameters<CanUseTool>[1],
@@ -13474,6 +13480,40 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               requestKind: "user_input",
               questions,
             });
+            // The compaction dialog (startToolCall false) is a control request that needs its answer.
+            if (asyncQuestions && options?.startToolCall !== false) {
+              yield* Effect.all(
+                [
+                  emitProviderEvent({
+                    type: "node.updated",
+                    driver: CLAUDE_PROVIDER,
+                    node: artifacts.node,
+                  }),
+                  emitProviderEvent({
+                    type: "runtime_request.updated",
+                    driver: CLAUDE_PROVIDER,
+                    runtimeRequest: {
+                      ...artifacts.request,
+                      responseCapability: { type: "message" },
+                    },
+                  }),
+                  emitProviderEvent({
+                    type: "turn_item.updated",
+                    driver: CLAUDE_PROVIDER,
+                    turnItem:
+                      artifacts.turnItem.type === "user_input_request"
+                        ? { ...artifacts.turnItem, responseMode: "message" }
+                        : artifacts.turnItem,
+                  }),
+                ],
+                { concurrency: 1 },
+              );
+              return {
+                behavior: "deny",
+                message: CLAUDE_ASYNC_QUESTION_NOTE,
+                toolUseID: callbackOptions.toolUseID,
+              } satisfies PermissionResult;
+            }
             const answers = yield* Deferred.make<ProviderUserInputAnswers, never>();
             yield* Ref.update(pendingRuntimeRequests, (current) => {
               const updated = new Map(current);

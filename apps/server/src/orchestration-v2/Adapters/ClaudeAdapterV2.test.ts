@@ -17729,6 +17729,76 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     ),
   );
 
+  it.effect("posts a question without blocking the turn when async questions are on", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeWakeHarnessWithOptions({
+        environment: { [ClaudeAdapterV2.CLAUDE_ASYNC_QUESTIONS_ENV]: "1" },
+      });
+      yield* harness.runtime.startTurn(
+        makeClaudeTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now: yield* DateTime.now,
+          attemptId: RunAttemptId.make("attempt-claude-async-question"),
+          text: "Deploy it.",
+          attachments: [],
+          runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            cwd: "/workspace",
+          }),
+        }),
+      );
+      // Not forked: the callback must return without an answer.
+      const result = yield* Effect.promise(() =>
+        harness.getOpenedOptions()!.canUseTool!(
+          "AskUserQuestion",
+          {
+            questions: [
+              {
+                header: "Target",
+                question: "Where should this deploy?",
+                options: [
+                  { label: "Production", description: "Deploy to production." },
+                  { label: "Staging", description: "Deploy to staging." },
+                ],
+                multiSelect: false,
+              },
+            ],
+          },
+          {
+            signal: new AbortController().signal,
+            toolUseID: "toolu_01AsyncQuestion",
+            requestId: "request-async-question",
+          },
+        ),
+      );
+      assert.equal(result?.behavior, "deny");
+      assert.include(result?.behavior === "deny" ? result.message : "", "stays open");
+      const pending = (yield* Queue.take(harness.runtimeRequestReceipts)).runtimeRequest;
+      assert.equal(pending.kind, "user_input");
+      assert.equal(pending.status, "pending");
+      assert.deepEqual(pending.responseCapability, { type: "message" });
+      const card = harness.events.flatMap((event) =>
+        event.type === "turn_item.updated" && event.turnItem.type === "user_input_request"
+          ? [event.turnItem]
+          : [],
+      );
+      assert.equal(card.length, 1);
+      assert.equal(card[0]?.responseMode, "message");
+      assert.equal(card[0]?.status, "waiting");
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          IdAllocator.layer,
+          McpProviderSessions.layer,
+          NodeServices.layer,
+          NodeCrypto.layer,
+        ),
+      ),
+    ),
+  );
+
   it.effect.each([
     { card: "an approval", toolName: "Bash", toolInput: { command: "echo probe" } },
     {
