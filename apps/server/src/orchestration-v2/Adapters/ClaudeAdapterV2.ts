@@ -4815,6 +4815,21 @@ function providerFailureFromApiRetry(message: SDKAPIRetryMessage): Orchestration
   });
 }
 
+export const CLAUDE_ANSWERS_VISIBLE_ENV = "T3CODE_CLAUDE_ANSWERS_VISIBLE";
+
+/**
+ * Claude has no answer phase, so clients fold every message but a turn's last under "Worked for".
+ * An answer followed by more work (a tool, a question card) then disappears. Opt-in: tag a finished
+ * message that reads as an answer, not a one-line progress note, as final_answer so it stays out.
+ */
+export function claudeTextReadsAsAnswer(text: string): boolean {
+  const trimmed = text.trim();
+  return (
+    trimmed.length >= 400 ||
+    (trimmed.length >= 150 && /^(?:#{1,6} |[-*] |\d+\. |\|)/m.test(trimmed))
+  );
+}
+
 function buildAssistantArtifacts(input: {
   readonly idAllocator: IdAllocator.IdAllocatorV2["Service"];
   readonly turnInput: ProviderAdapter.ProviderAdapterV2TurnInput;
@@ -4827,6 +4842,7 @@ function buildAssistantArtifacts(input: {
   readonly completedAt: DateTime.Utc;
   // A streamed message keeps its first timestamp across updates.
   readonly createdAt?: DateTime.Utc;
+  readonly answersVisible?: boolean;
 }): {
   readonly node: OrchestrationV2ExecutionNode;
   readonly message: OrchestrationV2ConversationMessage;
@@ -4904,6 +4920,9 @@ function buildAssistantArtifacts(input: {
       messageId,
       text: input.text,
       streaming,
+      ...(!streaming && input.answersVisible === true && claudeTextReadsAsAnswer(input.text)
+        ? { phase: "final_answer" as const }
+        : {}),
     },
   };
 }
@@ -9047,6 +9066,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
         }) {
           const ordinal = yield* resolveItemOrdinal(input.context, input.nativeItemId);
           const artifacts = buildAssistantArtifacts({
+            answersVisible: adapterOptions.environment[CLAUDE_ANSWERS_VISIBLE_ENV] === "1",
             idAllocator,
             turnInput: input.context.input,
             providerTurnId: input.context.providerTurnId,
@@ -9302,6 +9322,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               input.context.assistant.fallbackNativeItemId,
             );
             const artifacts = buildAssistantArtifacts({
+              answersVisible: adapterOptions.environment[CLAUDE_ANSWERS_VISIBLE_ENV] === "1",
               idAllocator,
               turnInput: input.context.input,
               providerTurnId: input.context.providerTurnId,
