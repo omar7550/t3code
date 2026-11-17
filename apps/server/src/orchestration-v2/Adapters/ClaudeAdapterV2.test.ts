@@ -14916,6 +14916,83 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     ),
   );
 
+  it.effect("holds background commands by default when T3CODE_BACKGROUND_COMMANDS_HOLD is on", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeWakeHarnessWithOptions({
+        environment: { [ClaudeAdapterV2.CLAUDE_BACKGROUND_COMMANDS_HOLD_ENV]: "1" },
+      });
+      const now = yield* DateTime.now;
+      const awaitBackgroundTasks = harness.runtime.awaitBackgroundTasks;
+      if (awaitBackgroundTasks === undefined) {
+        throw new Error("Claude adapter runtime must expose awaitBackgroundTasks.");
+      }
+      const nextRoster = Effect.fn("nextRoster")(function* (
+        matches: (tasks: ReadonlyArray<OrchestrationV2PendingBackgroundTask>) => boolean,
+      ) {
+        while (true) {
+          const { providerThread } = yield* Queue.take(harness.providerThreadReceipts);
+          const tasks = providerThread.pendingBackgroundTasks ?? [];
+          if (matches(tasks)) return tasks;
+        }
+      });
+      const marks = (tasks: ReadonlyArray<OrchestrationV2PendingBackgroundTask>) =>
+        tasks.map((task) => [task.taskId, task.awaited === true]);
+      yield* harness.runtime.startTurn(
+        makeClaudeTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now,
+          attemptId: RunAttemptId.make("attempt-claude-commands-hold"),
+          text: "Wait for the deploy in the background and start the dev server.",
+          attachments: [],
+        }),
+      );
+      yield* Queue.offer(
+        harness.sdkMessages,
+        claudeSdkFrame({
+          type: "system",
+          subtype: "background_tasks_changed",
+          tasks: ["deploy-wait", "dev-server"].map((taskId) => ({
+            task_id: taskId,
+            task_type: "local_bash",
+            description: taskId,
+          })),
+          uuid: "00000000-0000-4000-8000-000000000351",
+          session_id: WAKE_NATIVE_SESSION,
+        }),
+      );
+      // Unmarked commands hold the thread without a t3_background_wait call.
+      assert.deepStrictEqual(marks(yield* nextRoster((tasks) => tasks.length === 2)), [
+        ["deploy-wait", true],
+        ["dev-server", true],
+      ]);
+      // The agent releases a dev server explicitly.
+      yield* awaitBackgroundTasks({
+        providerThread: harness.providerThread,
+        taskIds: ["dev-server"],
+        awaited: false,
+      });
+      assert.deepStrictEqual(
+        marks(yield* nextRoster((tasks) => tasks.some((task) => task.awaited !== true))),
+        [
+          ["deploy-wait", true],
+          ["dev-server", false],
+        ],
+      );
+      yield* Queue.offer(harness.sdkMessages, turnOneResult);
+      yield* Queue.take(harness.terminalReceipts);
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          IdAllocator.layer,
+          McpProviderSessions.layer,
+          NodeServices.layer,
+          NodeCrypto.layer,
+        ),
+      ),
+    ),
+  );
+
   it.effect("keeps a running Claude monitor typed after many newer monitors end", () =>
     Effect.gen(function* () {
       const harness = yield* makeWakeHarness;
