@@ -3756,6 +3756,8 @@ function isClaudeLocalCommandEcho(message: SDKMessage): boolean {
   return typeof content === "string" && content.startsWith("<local-command-stdout>");
 }
 
+export const CLAUDE_BACKGROUND_COMMANDS_HOLD_ENV = "T3CODE_BACKGROUND_COMMANDS_HOLD";
+
 function claudePendingBackgroundTasksFromRoster(
   roster: ReadonlyMap<string, OrchestrationV2PendingBackgroundTask>,
   awaitedTaskIds: ReadonlySet<string>,
@@ -5918,6 +5920,11 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
         const awaitedBackgroundTasksByNativeThread = yield* Ref.make(
           new Map<string, Set<string>>(),
         );
+        // Opt-in: a background command holds its thread like an awaited one until the agent
+        // releases it with t3_background_wait waiting:false (a dev server, a watcher).
+        const backgroundCommandsHold =
+          adapterOptions.environment[CLAUDE_BACKGROUND_COMMANDS_HOLD_ENV] === "1";
+        const releasedBackgroundTasksByNativeThread = new Map<string, Set<string>>();
         // Wake eligibility is separate from the Waiting roster. It survives empty
         // background_tasks_changed levels (SDK: empty level can precede task_notification) and
         // is consumed when the first idle notification is buffered/offered so duplicates cannot
@@ -6119,7 +6126,26 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           roster: ReadonlyMap<string, OrchestrationV2PendingBackgroundTask>,
           awaitedTaskIds: ReadonlySet<string>,
         ): ReadonlyArray<OrchestrationV2PendingBackgroundTask> => {
-          const tasks = claudePendingBackgroundTasksFromRoster(roster, awaitedTaskIds);
+          const released =
+            nativeThreadId === null
+              ? undefined
+              : releasedBackgroundTasksByNativeThread.get(nativeThreadId);
+          if (released !== undefined) {
+            for (const taskId of released) if (!roster.has(taskId)) released.delete(taskId);
+          }
+          const tasks = claudePendingBackgroundTasksFromRoster(
+            roster,
+            backgroundCommandsHold
+              ? new Set([
+                  ...awaitedTaskIds,
+                  ...Array.from(roster.values())
+                    .filter(
+                      (task) => task.kind === "command" && released?.has(task.taskId) !== true,
+                    )
+                    .map((task) => task.taskId),
+                ])
+              : awaitedTaskIds,
+          );
           return nativeThreadId !== null && scheduledWakeupsByNativeThread.has(nativeThreadId)
             ? [...tasks, CLAUDE_SCHEDULED_WAKEUP_TASK]
             : tasks;
@@ -14233,6 +14259,15 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               );
               const matched = [...new Set(taskIds)].filter((taskId) => roster.has(taskId));
               if (matched.length === 0) return { matched };
+              const released =
+                releasedBackgroundTasksByNativeThread.get(nativeThreadId) ?? new Set();
+              for (const taskId of matched) {
+                if (awaited) released.delete(taskId);
+                else released.add(taskId);
+              }
+              if (released.size > 0)
+                releasedBackgroundTasksByNativeThread.set(nativeThreadId, released);
+              else releasedBackgroundTasksByNativeThread.delete(nativeThreadId);
               if (awaited) {
                 yield* addTaskIdsToNativeThreadSet(
                   awaitedBackgroundTasksByNativeThread,
