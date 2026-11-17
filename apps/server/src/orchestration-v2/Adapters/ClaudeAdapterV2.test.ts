@@ -8394,6 +8394,80 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       ),
   );
 
+  it("reads long or structured Claude text as an answer, not a short progress note", () => {
+    assert.isFalse(ClaudeAdapterV2.claudeTextReadsAsAnswer("Now checking the deploy log."));
+    assert.isFalse(ClaudeAdapterV2.claudeTextReadsAsAnswer("- one\n- two"));
+    assert.isTrue(ClaudeAdapterV2.claudeTextReadsAsAnswer("x".repeat(400)));
+    assert.isTrue(
+      ClaudeAdapterV2.claudeTextReadsAsAnswer(
+        "## Shadow mode\n\nIt never places a bid, so it produces no sales or cost result for our choices at all.\n- It checks that our bids stay sane every day.\n- It shows where we disagree.",
+      ),
+    );
+  });
+
+  it.effect.each([
+    { setting: "1", expected: "final_answer" },
+    { setting: undefined, expected: undefined },
+  ])(
+    "tags a finished Claude answer as final_answer only when the setting is $setting",
+    ({ setting, expected }) =>
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarnessWithOptions(
+          setting === undefined
+            ? {}
+            : { environment: { [ClaudeAdapterV2.CLAUDE_ANSWERS_VISIBLE_ENV]: setting } },
+        );
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make(`answer-phase-${setting ?? "off"}`),
+            text: "Explain shadow mode",
+            attachments: [],
+          }),
+        );
+        const answer = `## Shadow mode\n\n${"It never places a bid. ".repeat(20)}`;
+        yield* Queue.offer(
+          harness.sdkMessages,
+          claudeSdkFrame({
+            type: "assistant",
+            uuid: "answer-snapshot",
+            session_id: WAKE_NATIVE_SESSION,
+            parent_tool_use_id: null,
+            message: {
+              id: "answer-message",
+              model: "claude-opus-5-5",
+              content: [{ type: "text", text: answer }],
+            },
+          }),
+        );
+        yield* Queue.offer(
+          harness.sdkMessages,
+          makeResultFrame({ uuid: "answer-result", result: "" }),
+        );
+        yield* Queue.take(harness.terminalReceipts);
+        const replies = harness.events.flatMap((event) =>
+          event.type === "turn_item.updated" && event.turnItem.type === "assistant_message"
+            ? [event.turnItem]
+            : [],
+        );
+        const last = replies.at(-1);
+        assert.equal(last?.status, "completed");
+        assert.equal(last?.type === "assistant_message" ? last.phase : undefined, expected);
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(
+          Layer.mergeAll(
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+            NodeCrypto.layer,
+          ),
+        ),
+      ),
+  );
+
   // regression: #17270 root text_delta frames stream the reply before the block's snapshot
   it.effect("streams Claude assistant text deltas before the completed snapshot", () =>
     Effect.gen(function* () {
