@@ -12,6 +12,7 @@ import {
   antigravitySubagentLaunches,
   describeAntigravitySubagentLaunches,
   readAntigravityChildWork,
+  resolveAntigravityStepToolCallId,
 } from "./AntigravityChildWork.ts";
 import { sanitizeAntigravityToolPayload } from "./AntigravityProtocol.ts";
 import {
@@ -339,6 +340,52 @@ it.layer(NodeServices.layer)("readAntigravityChildWork", (it) => {
       expect(children).toHaveLength(16);
       expect(children.every((child) => child.truncated)).toBe(true);
       expect(JSON.stringify(children).length).toBeLessThan(600 * 1024);
+    }),
+  );
+
+  it.effect("resolves background task step IDs to their ACP toolCallId", () =>
+    Effect.gen(function* () {
+      const { profile } = yield* makeProfile({
+        steps: (logUri) => [
+          [
+            50,
+            132,
+            invokeStep({
+              callId: "call_10484616887436816983",
+              launches: [LAUNCH],
+              children: [{ id: CHILD, logUri }],
+            }),
+          ],
+        ],
+      });
+      expect(
+        yield* resolveAntigravityStepToolCallId({
+          profileDirectory: profile,
+          sessionId: ROOT,
+          taskId: `${ROOT}/task-50`,
+        }),
+      ).toBe("call_10484616887436816983");
+      expect(
+        yield* resolveAntigravityStepToolCallId({
+          profileDirectory: profile,
+          sessionId: ROOT,
+          taskId: "task-50",
+        }),
+      ).toBe("call_10484616887436816983");
+      expect(
+        yield* resolveAntigravityStepToolCallId({
+          profileDirectory: profile,
+          sessionId: ROOT,
+          taskId: "other-session/task-50",
+        }),
+      ).toBeUndefined();
+      expect(
+        yield* resolveAntigravityStepToolCallId({
+          profileDirectory: profile,
+          sessionId: ROOT,
+          taskId: `${ROOT}/task-999`,
+        }),
+      ).toBeUndefined();
     }),
   );
 });

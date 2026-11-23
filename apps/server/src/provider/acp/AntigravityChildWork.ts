@@ -417,6 +417,62 @@ class AntigravityChildWorkReadError extends Schema.TaggedError<AntigravityChildW
   }
 }
 
+const decodeStepToolCallId = safely((payload): string | undefined =>
+  text(message(message(payload, STEP_METADATA), METADATA_TOOL_CALL), 1),
+);
+
+const ANTIGRAVITY_BACKGROUND_TASK_ID = /^(?:([A-Za-z0-9-]{1,64})\/)?task-(\d+)$/;
+
+/**
+ * Resolves an Antigravity background task ID (`<sessionId>/task-<stepIdx>` or `task-<stepIdx>`)
+ * to the ACP `toolCallId` stored on that step in the session's own unlinked SQLite log.
+ */
+export const resolveAntigravityStepToolCallId = Effect.fn("resolveAntigravityStepToolCallId")(
+  function* (input: {
+    readonly profileDirectory: string;
+    readonly sessionId: string;
+    readonly taskId: string;
+  }): Effect.fn.Return<string | undefined> {
+    if (!NATIVE_ID.test(input.sessionId)) return undefined;
+    const match = ANTIGRAVITY_BACKGROUND_TASK_ID.exec(input.taskId.trim());
+    if (match === null) return undefined;
+    const [, prefixSessionId, stepIndexText] = match;
+    if (prefixSessionId !== undefined && prefixSessionId !== input.sessionId) return undefined;
+    const stepIndex = Number(stepIndexText);
+    if (!Number.isSafeInteger(stepIndex) || stepIndex < 0) return undefined;
+    return yield* Effect.tryPromise({
+      try: async (): Promise<string | undefined> => {
+        const profileRoot = await antigravityProfileRoot(input.profileDirectory);
+        const databasePath =
+          profileRoot === undefined
+            ? undefined
+            : (
+                await antigravityManagedPath(
+                  profileRoot,
+                  ["antigravity-acp", "conversations", `${input.sessionId}.db`],
+                  "file",
+                )
+              )?.path;
+        if (profileRoot === undefined || databasePath === undefined) return undefined;
+        const database = new NodeSqlite.DatabaseSync(databasePath, { readOnly: true });
+        try {
+          database.exec("PRAGMA busy_timeout = 100");
+          const row = database
+            .prepare(
+              "SELECT step_payload FROM steps WHERE idx = ? AND step_format = 0 AND length(step_payload) <= ?",
+            )
+            .get(stepIndex, MAX_STEP_BYTES);
+          const payload = payloadOf(row);
+          return payload === undefined ? undefined : decodeStepToolCallId(payload);
+        } finally {
+          database.close();
+        }
+      },
+      catch: () => undefined,
+    }).pipe(Effect.orElseSucceed(() => undefined));
+  },
+);
+
 /** Children a subagent tool call launched, proven by the parent's own session record. */
 export const readAntigravityChildWork = Effect.fn("readAntigravityChildWork")(function* (input: {
   readonly profileDirectory: string;
