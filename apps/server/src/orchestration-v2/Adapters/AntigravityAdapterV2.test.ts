@@ -23,17 +23,27 @@ import * as FileSystem from "effect/FileSystem";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 import { ChildProcessSpawner } from "effect/process";
 import type * as EffectAcpSchema from "effect-acp/compat";
 import * as EffectAcpErrors from "effect-acp/errors";
 
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
+import type * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
 import * as TestProviderHost from "@t3tools/provider-testing/TestProviderHost";
 import type * as AcpSessionRuntime from "@t3tools/provider-acp/server/AcpSessionRuntime";
 import { makeAntigravityAcpRuntime } from "../../provider/acp/AntigravityAcpSupport.ts";
+import {
+  CHILD,
+  invokeStep,
+  LAUNCH,
+  makeProfile,
+  ROOT,
+} from "../../provider/acp/AntigravityChildWork.testkit.ts";
 import { normalizeAntigravitySessionUpdate } from "../../provider/acp/AntigravityProtocol.ts";
 import { ANTIGRAVITY_SIGN_IN_REQUIRED_MESSAGE } from "../../provider/antigravityAuthSupport.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
@@ -1271,6 +1281,626 @@ describe("AntigravityAdapterV2 session system prompt", () => {
           assert.notInclude(append, "systemPrompt");
           assert.include(sent, "<pull_request_linking>");
         }
+      }).pipe(Effect.provide(layerSession)),
+  );
+});
+
+describe("AntigravityAdapterV2 background tasks and reactive wakes", () => {
+  const makeHarness = Effect.fn("AntigravityAdapterV2.test.makeBackgroundHarness")(
+    function* (input: {
+      readonly name: string;
+      readonly runtimeMode: "full-access" | "approval-required";
+      readonly profileDirectory?: string;
+      readonly onPrompt: (helpers: {
+        readonly sendUpdate: (
+          update: EffectAcpSchema.SessionUpdate,
+        ) => Effect.Effect<void, EffectAcpErrors.AcpError>;
+        readonly requestPermission: (
+          request: EffectAcpSchema.RequestPermissionRequest,
+        ) => Effect.Effect<EffectAcpSchema.RequestPermissionResponse, EffectAcpErrors.AcpError>;
+      }) => Effect.Effect<EffectAcpSchema.PromptResponse, EffectAcpErrors.AcpError>;
+    }) {
+      const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const path = yield* Path.Path;
+      const crypto = yield* SecureRandom.SecureRandom;
+      const mockAgentPath = yield* path.fromFileUrl(
+        new URL("../../../scripts/acp-mock-agent.ts", import.meta.url),
+      );
+      type RuntimeService = AcpSessionRuntime.AcpSessionRuntime["Service"];
+      let sessionUpdate: Parameters<RuntimeService["handleSessionUpdate"]>[0] | undefined;
+      let requestPermissionHandler:
+        | Parameters<RuntimeService["handleRequestPermission"]>[0]
+        | undefined;
+      let onOutgoingResponse: ((requestId: string) => Effect.Effect<void>) | undefined;
+      let permissionCounter = 0;
+      const continuations =
+        yield* Queue.unbounded<ProviderContinuationRequests.ProviderContinuationRequest>();
+      const instanceId = ProviderInstanceId.make(`antigravity-bg-${input.name}`);
+      const threadId = ThreadId.make(`thread-antigravity-bg-${input.name}`);
+      const sendUpdate = (update: EffectAcpSchema.SessionUpdate) =>
+        sessionUpdate === undefined
+          ? Effect.die("sessionUpdate handler was not wired")
+          : sessionUpdate(
+              normalizeAntigravitySessionUpdate({ sessionId: "mock-session-1", update }),
+            );
+      const requestPermission = (request: EffectAcpSchema.RequestPermissionRequest) => {
+        const requestId = `perm-${++permissionCounter}`;
+        return requestPermissionHandler === undefined
+          ? Effect.die("requestPermission handler was not wired")
+          : requestPermissionHandler(request, {
+              requestId,
+              method: "session/request_permission",
+            }).pipe(Effect.tap(() => onOutgoingResponse?.(requestId) ?? Effect.void));
+      };
+      const adapter = yield* makeAntigravityAdapterV2({
+        instanceId,
+        selfInvocation: yield* resolveSelfInvocation(),
+        ...(input.profileDirectory === undefined
+          ? {}
+          : { profileDirectory: input.profileDirectory }),
+        continuationRequests: {
+          offer: (request) => Queue.offer(continuations, request).pipe(Effect.asVoid),
+        },
+        makeRuntime: (runtimeInput) => {
+          onOutgoingResponse = runtimeInput.onOutgoingResponse;
+          return makeAntigravityAcpRuntime({
+            ...runtimeInput,
+            childProcessSpawner,
+            spawn: {
+              command: process.execPath,
+              args: [mockAgentPath],
+              cwd: runtimeInput.cwd,
+              env: { T3_ACP_ANTIGRAVITY: "1" },
+            },
+          }).pipe(
+            Effect.provideService(SecureRandom.SecureRandom, crypto),
+            Effect.map((runtime): RuntimeService => ({
+              ...runtime,
+              handleSessionUpdate: (handler) =>
+                Effect.sync(() => {
+                  sessionUpdate = handler;
+                }).pipe(Effect.andThen(runtime.handleSessionUpdate(handler))),
+              handleRequestPermission: (handler) =>
+                Effect.sync(() => {
+                  requestPermissionHandler = handler;
+                }).pipe(Effect.andThen(runtime.handleRequestPermission(handler))),
+              prompt: () => input.onPrompt({ sendUpdate, requestPermission }),
+            })),
+          );
+        },
+        withProcess: (_stop, task) => task,
+        defaultModel: Effect.undefined,
+      });
+      const runtimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+        runtimeMode: input.runtimeMode,
+        interactionMode: "default",
+        cwd: process.cwd(),
+      });
+      const modelSelection = { instanceId, model: "gemini-test-low" } as const;
+      const session = yield* adapter.openSession({
+        threadId,
+        providerSessionId: ProviderSessionId.make(`provider-session-antigravity-bg-${input.name}`),
+        modelSelection,
+        runtimePolicy,
+      });
+      const providerThread = yield* session.ensureThread({
+        threadId,
+        modelSelection,
+        runtimePolicy,
+      });
+      const now = yield* DateTime.now;
+      const appThread = {
+        createdBy: "user" as const,
+        creationSource: "web" as const,
+        id: threadId,
+        projectId: ProjectId.make(`project-antigravity-bg-${input.name}`),
+        title: `Antigravity background ${input.name}`,
+        providerInstanceId: instanceId,
+        modelSelection,
+        runtimeMode: input.runtimeMode,
+        interactionMode: "default" as const,
+        branch: null,
+        worktreePath: process.cwd(),
+        activeProviderThreadId: providerThread.id,
+        lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
+        forkedFrom: null,
+        createdAt: now,
+        updatedAt: now,
+        archivedAt: null,
+        settledOverride: null,
+        settledAt: null,
+        lastVisitedAt: null,
+        deletedAt: null,
+      };
+      const startTurn = (turn: {
+        readonly ordinal: number;
+        readonly providerTurnOrdinal: number;
+        readonly text: string;
+        readonly continuation?: boolean;
+        readonly providerThread?: typeof providerThread;
+      }) =>
+        session.startTurn({
+          appThread,
+          threadId,
+          runId: RunId.make(`run-antigravity-bg-${input.name}-${turn.ordinal}`),
+          runOrdinal: turn.ordinal,
+          providerTurnOrdinal: turn.providerTurnOrdinal,
+          attemptId: RunAttemptId.make(`attempt-antigravity-bg-${input.name}-${turn.ordinal}`),
+          rootNodeId: NodeId.make(`node-antigravity-bg-${input.name}-${turn.ordinal}`),
+          providerThread: turn.providerThread ?? providerThread,
+          message: {
+            createdBy: turn.continuation ? "agent" : "user",
+            creationSource: turn.continuation ? "provider" : "web",
+            messageId: MessageId.make(`message-antigravity-bg-${input.name}-${turn.ordinal}`),
+            text: turn.text,
+            attachments: [],
+          },
+          modelSelection,
+          runtimePolicy,
+        });
+      return {
+        session,
+        providerThread,
+        continuations,
+        sendUpdate,
+        requestPermission,
+        startTurn,
+      };
+    },
+  );
+
+  it.effect(
+    "tracks open background commands across end_turn, wakes on completion, handles post-settle permission requests, and settles after usage_update",
+    () =>
+      Effect.gen(function* () {
+        const harness = yield* makeHarness({
+          name: "reactive-wake",
+          runtimeMode: "full-access",
+          onPrompt: ({ sendUpdate }) =>
+            Effect.gen(function* () {
+              yield* sendUpdate({
+                sessionUpdate: "tool_call",
+                toolCallId: "call_bg_1",
+                name: "run_command",
+                kind: "execute",
+                title: "aside repl --file pull.js",
+                status: "in_progress",
+                rawInput: {
+                  CommandLine: "aside repl --file pull.js",
+                  WaitMsBeforeAsync: 500,
+                },
+              });
+              yield* sendUpdate({
+                sessionUpdate: "agent_message_chunk",
+                content: { type: "text", text: "Started pull; waiting for it to finish." },
+              });
+              yield* sendUpdate({
+                sessionUpdate: "usage_update",
+                used: 9682,
+                size: 1_048_576,
+              });
+              return { stopReason: "end_turn" as const };
+            }),
+        });
+
+        assert.isTrue(harness.session.backgroundTasksEndWithProcess);
+        yield* harness.startTurn({ ordinal: 1, providerTurnOrdinal: 1, text: "run pull" });
+
+        const turn1Events = Array.from(
+          yield* harness.session.events.pipe(
+            Stream.takeUntil((event) => event.type === "turn.terminal"),
+            Stream.runCollect,
+          ),
+        );
+
+        // Background command must stay running (not force-completed on end_turn).
+        const bgItemAfterTurn1 = turn1Events.findLast(
+          (event) =>
+            event.type === "turn_item.updated" &&
+            event.turnItem.nativeItemRef?.nativeId === "call_bg_1",
+        );
+        assert.equal(bgItemAfterTurn1?.type, "turn_item.updated");
+        if (bgItemAfterTurn1?.type === "turn_item.updated") {
+          assert.equal(bgItemAfterTurn1.turnItem.status, "running");
+        }
+
+        const threadAfterTurn1 = turn1Events.findLast(
+          (event) => event.type === "provider_thread.updated",
+        );
+        assert.equal(threadAfterTurn1?.type, "provider_thread.updated");
+        if (threadAfterTurn1?.type === "provider_thread.updated") {
+          assert.equal(threadAfterTurn1.pendingBackgroundWork, true);
+          assert.deepEqual(threadAfterTurn1.providerThread.pendingBackgroundTasks, [
+            {
+              taskId: "call_bg_1",
+              kind: "command",
+              awaited: true,
+              description: "aside repl --file pull.js",
+              runId: RunId.make("run-antigravity-bg-reactive-wake-1"),
+            },
+          ]);
+        }
+        assert.isTrue(yield* harness.session.hasPendingBackgroundWork!);
+        assert.isTrue(
+          yield* harness.session.hasPendingBackgroundWorkForThread!(harness.providerThread),
+        );
+
+        // Post-settle completion of call_bg_1 updates the Turn 1 row, clears the roster, and offers a continuation.
+        yield* harness.sendUpdate({
+          sessionUpdate: "tool_call_update",
+          toolCallId: "call_bg_1",
+          status: "completed",
+          rawOutput: {
+            output: "Command exited with code 0.\n\nCommand output:\nPULL_OK\n",
+            exit_code: 0,
+          },
+          content: [
+            {
+              type: "content",
+              content: {
+                type: "text",
+                text: "Command exited with code 0.\n\nCommand output:\nPULL_OK\n",
+              },
+            },
+          ],
+        });
+
+        const continuation = yield* Queue.take(harness.continuations);
+        assert.equal(continuation.driver, "antigravity");
+
+        // Start the continuation run and collect events until its turn.terminal.
+        const updatedThread =
+          threadAfterTurn1?.type === "provider_thread.updated"
+            ? threadAfterTurn1.providerThread
+            : harness.providerThread;
+        yield* harness.startTurn({
+          ordinal: 2,
+          providerTurnOrdinal: 2,
+          text: "",
+          continuation: true,
+          providerThread: updatedThread,
+        });
+
+        const wakeEventsFiber = yield* harness.session.events.pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runCollect,
+          Effect.forkScoped,
+        );
+
+        // Multi-second thinking gap (>3s) must NOT prematurely settle the wake turn.
+        yield* harness.sendUpdate({
+          sessionUpdate: "agent_thought_chunk",
+          content: { type: "text", text: "Pull finished; running ingest." },
+        });
+        yield* TestClock.adjust("5 seconds");
+        yield* harness.sendUpdate({
+          sessionUpdate: "usage_update",
+          used: 11_000,
+          size: 1_048_576,
+        });
+        // Tool call arrives immediately after step 1 usage_update and requests permission.
+        yield* harness.sendUpdate({
+          sessionUpdate: "tool_call",
+          toolCallId: "call_wake_ingest",
+          name: "run_command",
+          kind: "execute",
+          title: "python -m hdads.ingest",
+          status: "in_progress",
+          rawInput: { CommandLine: "python -m hdads.ingest", WaitMsBeforeAsync: 5000 },
+        });
+        const permissionResponse = yield* harness.requestPermission({
+          sessionId: "mock-session-1",
+          toolCall: {
+            toolCallId: "call_wake_ingest",
+            kind: "execute",
+            title: "python -m hdads.ingest",
+            status: "pending",
+            rawInput: { CommandLine: "python -m hdads.ingest" },
+          },
+          options: [
+            { optionId: "allow", name: "Allow", kind: "allow_once" },
+            { optionId: "deny", name: "Deny", kind: "reject_once" },
+          ],
+        });
+        assert.deepEqual(permissionResponse, {
+          outcome: { outcome: "selected", optionId: "allow" },
+        });
+        yield* harness.sendUpdate({
+          sessionUpdate: "tool_call_update",
+          toolCallId: "call_wake_ingest",
+          status: "completed",
+          rawOutput: { output: "INGEST_OK\n", exit_code: 0 },
+        });
+        // Post-tool thinking gap (>3s) must ALSO wait for step 2 usage_update.
+        yield* TestClock.adjust("5 seconds");
+        yield* harness.sendUpdate({
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "Ingest complete." },
+        });
+        yield* harness.sendUpdate({
+          sessionUpdate: "usage_update",
+          used: 11_200,
+          size: 1_048_576,
+        });
+        yield* TestClock.adjust("2 seconds");
+
+        const wakeEvents = Array.from(yield* Fiber.join(wakeEventsFiber));
+        const completedBgItem = wakeEvents.findLast(
+          (event) =>
+            event.type === "turn_item.updated" &&
+            event.turnItem.nativeItemRef?.nativeId === "call_bg_1",
+        );
+        assert.equal(completedBgItem?.type, "turn_item.updated");
+        if (
+          completedBgItem?.type === "turn_item.updated" &&
+          completedBgItem.turnItem.type === "command_execution"
+        ) {
+          assert.equal(completedBgItem.turnItem.status, "completed");
+          assert.equal(completedBgItem.turnItem.exitCode, 0);
+          assert.include(completedBgItem.turnItem.output ?? "", "PULL_OK");
+        }
+        const assistantReply = wakeEvents.findLast(
+          (event) =>
+            event.type === "turn_item.updated" && event.turnItem.type === "assistant_message",
+        );
+        assert.equal(assistantReply?.type, "turn_item.updated");
+        if (
+          assistantReply?.type === "turn_item.updated" &&
+          assistantReply.turnItem.type === "assistant_message"
+        ) {
+          assert.equal(assistantReply.turnItem.text, "Ingest complete.");
+        }
+        const wakeTerminal = wakeEvents.findLast((event) => event.type === "turn.terminal");
+        assert.equal(wakeTerminal?.type, "turn.terminal");
+        if (wakeTerminal?.type === "turn.terminal") {
+          assert.equal(wakeTerminal.status, "completed");
+        }
+        assert.isFalse(yield* harness.session.hasPendingBackgroundWork!);
+      }).pipe(Effect.provide(layerSession)),
+  );
+
+  it.effect(
+    "keeps IsDaemon commands non-blocking by default and supports t3_background_wait by step task ID or toolCallId",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const { profile } = yield* makeProfile({
+          steps: (logUri) => [
+            [
+              50,
+              132,
+              invokeStep({
+                callId: "call_daemon_1",
+                launches: [LAUNCH],
+                children: [{ id: CHILD, logUri }],
+              }),
+            ],
+          ],
+        });
+        yield* fileSystem.copyFile(
+          path.join(profile, "antigravity-acp", "conversations", `${ROOT}.db`),
+          path.join(profile, "antigravity-acp", "conversations", "mock-session-1.db"),
+        );
+        const harness = yield* makeHarness({
+          name: "daemon-and-wait",
+          runtimeMode: "full-access",
+          profileDirectory: profile,
+          onPrompt: ({ sendUpdate }) =>
+            Effect.gen(function* () {
+              yield* sendUpdate({
+                sessionUpdate: "tool_call",
+                toolCallId: "call_daemon_1",
+                name: "run_command",
+                kind: "execute",
+                title: "vp run dev",
+                status: "in_progress",
+                rawInput: { CommandLine: "vp run dev", IsDaemon: true, WaitMsBeforeAsync: 500 },
+              });
+              yield* sendUpdate({
+                sessionUpdate: "tool_call",
+                toolCallId: "call_timer_1",
+                name: "schedule",
+                kind: "other",
+                title: "Run schedule",
+                status: "in_progress",
+                rawInput: { DurationSeconds: 30, Prompt: "Check status" },
+              });
+              return { stopReason: "end_turn" as const };
+            }),
+        });
+
+        yield* harness.startTurn({ ordinal: 1, providerTurnOrdinal: 1, text: "start dev & timer" });
+        const events = Array.from(
+          yield* harness.session.events.pipe(
+            Stream.takeUntil((event) => event.type === "turn.terminal"),
+            Stream.runCollect,
+          ),
+        );
+        const threadAfter = events.findLast((event) => event.type === "provider_thread.updated");
+        assert.equal(threadAfter?.type, "provider_thread.updated");
+        if (threadAfter?.type === "provider_thread.updated") {
+          assert.deepEqual(threadAfter.providerThread.pendingBackgroundTasks, [
+            {
+              taskId: "call_daemon_1",
+              kind: "command",
+              description: "vp run dev",
+              runId: RunId.make("run-antigravity-bg-daemon-and-wait-1"),
+            },
+            {
+              taskId: "call_timer_1",
+              kind: "background_task",
+              description: "Check status",
+              runId: RunId.make("run-antigravity-bg-daemon-and-wait-1"),
+            },
+          ]);
+        }
+
+        // t3_background_wait matches the native Antigravity task ID (`<sessionId>/task-50`) and marks awaited.
+        const markResult = yield* harness.session.awaitBackgroundTasks!({
+          providerThread: harness.providerThread,
+          taskIds: ["mock-session-1/task-50", "unknown-task"],
+          awaited: true,
+        });
+        assert.deepEqual(markResult, { matched: ["mock-session-1/task-50"] });
+
+        const afterMark = yield* harness.session.events.pipe(
+          Stream.filter((event) => event.type === "provider_thread.updated"),
+          Stream.runHead,
+        );
+        assert.equal(afterMark._tag, "Some");
+        if (afterMark._tag === "Some" && afterMark.value.type === "provider_thread.updated") {
+          assert.equal(afterMark.value.providerThread.pendingBackgroundTasks?.[0]?.awaited, true);
+        }
+
+        // Unmarking via toolCallId clears `awaited`.
+        const unmarkResult = yield* harness.session.awaitBackgroundTasks!({
+          providerThread: harness.providerThread,
+          taskIds: ["call_daemon_1"],
+          awaited: false,
+        });
+        assert.deepEqual(unmarkResult, { matched: ["call_daemon_1"] });
+        const afterUnmark = yield* harness.session.events.pipe(
+          Stream.filter((event) => event.type === "provider_thread.updated"),
+          Stream.runHead,
+        );
+        assert.equal(afterUnmark._tag, "Some");
+        if (afterUnmark._tag === "Some" && afterUnmark.value.type === "provider_thread.updated") {
+          assert.isUndefined(afterUnmark.value.providerThread.pendingBackgroundTasks?.[0]?.awaited);
+        }
+      }).pipe(Effect.provide(layerSession)),
+  );
+
+  it.effect(
+    "clears pending background tasks and quarantines late wakes when Stop interrupts a Waiting thread",
+    () =>
+      Effect.gen(function* () {
+        const harness = yield* makeHarness({
+          name: "stop-while-waiting",
+          runtimeMode: "full-access",
+          onPrompt: ({ sendUpdate }) =>
+            Effect.gen(function* () {
+              yield* sendUpdate({
+                sessionUpdate: "tool_call",
+                toolCallId: "call_stop_1",
+                name: "run_command",
+                kind: "execute",
+                title: "sleep 60",
+                status: "in_progress",
+                rawInput: { CommandLine: "sleep 60", WaitMsBeforeAsync: 500 },
+              });
+              return { stopReason: "end_turn" as const };
+            }),
+        });
+
+        yield* harness.startTurn({ ordinal: 1, providerTurnOrdinal: 1, text: "sleep" });
+        const turn1Events = Array.from(
+          yield* harness.session.events.pipe(
+            Stream.takeUntil((event) => event.type === "turn.terminal"),
+            Stream.runCollect,
+          ),
+        );
+        const turn1Terminal = turn1Events.findLast((event) => event.type === "turn.terminal");
+        assert.equal(turn1Terminal?.type, "turn.terminal");
+        assert.isTrue(yield* harness.session.hasPendingBackgroundWork!);
+
+        yield* harness.session.interruptTurn({
+          providerThread: harness.providerThread,
+          providerTurnId:
+            turn1Terminal?.type === "turn.terminal" ? turn1Terminal.providerTurnId : ("" as never),
+          requestRuntimeRestart: true,
+        });
+
+        assert.isFalse(yield* harness.session.hasPendingBackgroundWork!);
+        // A late post-settle completion after Stop must not offer a continuation run.
+        yield* harness.sendUpdate({
+          sessionUpdate: "tool_call_update",
+          toolCallId: "call_stop_1",
+          status: "completed",
+          rawOutput: { output: "LATE\n", exit_code: 0 },
+        });
+        assert.equal(yield* Queue.size(harness.continuations), 0);
+      }).pipe(Effect.provide(layerSession)),
+  );
+
+  it.effect(
+    "holds a post-settle permission request until the reactive continuation turn attaches in approval-required mode",
+    () =>
+      Effect.gen(function* () {
+        const harness = yield* makeHarness({
+          name: "wake-approval",
+          runtimeMode: "approval-required",
+          onPrompt: ({ sendUpdate }) =>
+            Effect.gen(function* () {
+              yield* sendUpdate({
+                sessionUpdate: "tool_call",
+                toolCallId: "call_bg_approval",
+                name: "run_command",
+                kind: "execute",
+                title: "sleep 5",
+                status: "in_progress",
+                rawInput: { CommandLine: "sleep 5", WaitMsBeforeAsync: 500 },
+              });
+              return { stopReason: "end_turn" as const };
+            }),
+        });
+
+        yield* harness.startTurn({ ordinal: 1, providerTurnOrdinal: 1, text: "sleep" });
+        yield* harness.session.events.pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runDrain,
+        );
+
+        // Agent wakes up and requests permission BEFORE the continuation turn has attached.
+        const permissionFiber = yield* harness
+          .requestPermission({
+            sessionId: "mock-session-1",
+            toolCall: {
+              toolCallId: "call_after_wake_ask",
+              kind: "execute",
+              title: "echo APPROVED",
+              status: "pending",
+              rawInput: { CommandLine: "echo APPROVED" },
+            },
+            options: [
+              { optionId: "allow", name: "Allow", kind: "allow_once" },
+              { optionId: "deny", name: "Deny", kind: "reject_once" },
+            ],
+          })
+          .pipe(Effect.forkScoped);
+
+        const continuation = yield* Queue.take(harness.continuations);
+        assert.equal(continuation.driver, "antigravity");
+
+        const runtimeRequestEventFiber = yield* harness.session.events.pipe(
+          Stream.filter((event) => event.type === "runtime_request.updated"),
+          Stream.runHead,
+          Effect.forkScoped({ startImmediately: true }),
+        );
+
+        yield* harness.startTurn({
+          ordinal: 2,
+          providerTurnOrdinal: 2,
+          text: "",
+          continuation: true,
+        });
+
+        const runtimeRequestEvent = yield* Fiber.join(runtimeRequestEventFiber);
+        assert.equal(runtimeRequestEvent._tag, "Some");
+        if (
+          runtimeRequestEvent._tag === "Some" &&
+          runtimeRequestEvent.value.type === "runtime_request.updated"
+        ) {
+          yield* harness.session.respondToRuntimeRequest({
+            requestId: runtimeRequestEvent.value.runtimeRequest.id,
+            decision: "accept",
+          });
+        }
+
+        const outcome = yield* Fiber.join(permissionFiber);
+        assert.deepEqual(outcome, {
+          outcome: { outcome: "selected", optionId: "allow" },
+        });
       }).pipe(Effect.provide(layerSession)),
   );
 });

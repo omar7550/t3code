@@ -10,6 +10,7 @@ import * as Schema from "effect/Schema";
 import type * as EffectAcpSchema from "effect-acp/compat";
 import * as AcpWireSchema from "effect-acp/schema-v1";
 
+import type { AcpBackgroundWorkTask } from "@t3tools/provider-acp/server/adapter";
 import type { AcpToolCallState } from "@t3tools/provider-acp/server/runtimeModel";
 
 import {
@@ -35,6 +36,7 @@ const NativeToolFields = Schema.Struct({
   workingDir: Schema.optional(Schema.String),
   combinedOutput: Schema.optional(Schema.String),
   combined_output: Schema.optional(Schema.String),
+  output: Schema.optional(Schema.String),
   exitCode: Schema.optional(Schema.Int),
   exit_code: Schema.optional(Schema.Int),
   imagePath: Schema.optional(Schema.String),
@@ -435,7 +437,7 @@ export function normalizeAntigravityToolCall(
     output?.workingDir ??
     output?.working_dir;
   const cwd = nativeCwd?.trim() ? boundText(nativeCwd.trim()) : undefined;
-  const nativeOutput = output?.combinedOutput ?? output?.combined_output;
+  const nativeOutput = output?.combinedOutput ?? output?.combined_output ?? output?.output;
   const aggregatedOutput = nativeOutput === undefined ? undefined : boundText(nativeOutput);
   const exitCode = output?.exitCode ?? output?.exit_code;
   const imagePath = localImagePath(output?.imagePath);
@@ -506,4 +508,100 @@ export function classifyAntigravitySubagentToolCall(
 export function antigravitySubagentOutput(toolCall: AcpToolCallState): string | undefined {
   const output = toolCall.data.rawOutput;
   return typeof output === "string" && output.trim() ? boundText(output.trim()) : undefined;
+}
+
+const ANTIGRAVITY_BACKGROUND_DESCRIPTION_LIMIT = 240;
+
+function antigravityBackgroundDescription(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  if (trimmed.length === 0) return undefined;
+  return trimmed.length > ANTIGRAVITY_BACKGROUND_DESCRIPTION_LIMIT
+    ? copyBoundedText(`${trimmed.slice(0, ANTIGRAVITY_BACKGROUND_DESCRIPTION_LIMIT - 3)}...`)
+    : trimmed;
+}
+
+function isAntigravityDaemonInput(rawInput: unknown): boolean {
+  return (
+    Predicate.isObject(rawInput) &&
+    (rawInput.IsDaemon === true || rawInput.isDaemon === true || rawInput.is_daemon === true)
+  );
+}
+
+/**
+ * Antigravity keeps background commands, timers, workflows, and async subagents `in_progress`
+ * across `session/prompt` return and completes them later before waking the agent reactively.
+ * Daemon processes (`IsDaemon: true`) stay tracked without holding thread completion.
+ */
+export function extractAntigravityBackgroundWorkTask(
+  toolCall: AcpToolCallState,
+): AcpBackgroundWorkTask | undefined {
+  const meta = toolCall.data.meta;
+  if (Predicate.isObject(meta) && meta.is_mcp_tool_call === true) return undefined;
+  const toolName = typeof toolCall.data.name === "string" ? toolCall.data.name.trim() : undefined;
+  const rawInput = Predicate.isObject(toolCall.data.rawInput) ? toolCall.data.rawInput : undefined;
+  const isDaemon = isAntigravityDaemonInput(rawInput);
+
+  if (toolName === "run_command" || toolCall.kind === "execute") {
+    const description =
+      antigravityBackgroundDescription(toolCall.command) ??
+      antigravityBackgroundDescription(rawInput?.toolSummary) ??
+      antigravityBackgroundDescription(toolCall.title);
+    return {
+      taskId: toolCall.toolCallId,
+      kind: "command",
+      ...(!isDaemon ? { awaited: true } : {}),
+      ...(description === undefined ? {} : { description }),
+    };
+  }
+
+  if (
+    toolName === "schedule" ||
+    toolCall.title === "Run schedule" ||
+    toolCall.title === "Running schedule"
+  ) {
+    const description =
+      antigravityBackgroundDescription(rawInput?.Prompt) ??
+      (typeof rawInput?.DurationSeconds === "number"
+        ? `Timer (${rawInput.DurationSeconds}s)`
+        : typeof rawInput?.CronExpression === "string"
+          ? antigravityBackgroundDescription(`Schedule (${rawInput.CronExpression})`)
+          : antigravityBackgroundDescription(toolCall.title));
+    return {
+      taskId: toolCall.toolCallId,
+      kind: isDaemon ? "monitor" : "background_task",
+      ...(description === undefined ? {} : { description }),
+    };
+  }
+
+  if (
+    toolName === "run_workflow" ||
+    toolCall.title === "Run run_workflow" ||
+    toolCall.title === "Running run_workflow"
+  ) {
+    const description =
+      antigravityBackgroundDescription(rawInput?.Description) ??
+      antigravityBackgroundDescription(toolCall.title);
+    return {
+      taskId: toolCall.toolCallId,
+      kind: "background_task",
+      ...(description === undefined ? {} : { description }),
+    };
+  }
+
+  if (
+    (toolName === "invoke_subagent" || toolCall.title === "Run invoke_subagent") &&
+    classifyAntigravitySubagentToolCall(toolCall) === undefined
+  ) {
+    const description =
+      antigravityBackgroundDescription(rawInput?.Role) ??
+      antigravityBackgroundDescription(toolCall.title);
+    return {
+      taskId: toolCall.toolCallId,
+      kind: "subagent",
+      ...(description === undefined ? {} : { description }),
+    };
+  }
+
+  return undefined;
 }

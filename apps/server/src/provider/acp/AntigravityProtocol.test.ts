@@ -4,6 +4,7 @@ import type * as EffectAcpSchema from "effect-acp/compat";
 import * as AcpWireSchema from "effect-acp/schema-v1";
 
 import {
+  extractAntigravityBackgroundWorkTask,
   extractAntigravityUserInputQuestion,
   antigravityApprovalOptions,
   antigravitySubagentOutput,
@@ -620,6 +621,153 @@ describe("Antigravity served reads", () => {
       sessionUpdate: "tool_call_update",
       toolCallId: "call_current",
       status: "completed",
+    });
+  });
+});
+
+describe("Antigravity background work classification", () => {
+  it("classifies awaited commands, daemons, schedules, workflows, and async subagents", () => {
+    expect(
+      extractAntigravityBackgroundWorkTask({
+        toolCallId: "call_cmd",
+        kind: "execute",
+        title: "sleep 5",
+        command: "sleep 5",
+        status: "inProgress",
+        data: { name: "run_command", rawInput: { CommandLine: "sleep 5", WaitMsBeforeAsync: 500 } },
+      }),
+    ).toEqual({
+      taskId: "call_cmd",
+      kind: "command",
+      awaited: true,
+      description: "sleep 5",
+    });
+
+    expect(
+      extractAntigravityBackgroundWorkTask({
+        toolCallId: "call_daemon",
+        kind: "execute",
+        title: "vp run dev",
+        command: "vp run dev",
+        status: "inProgress",
+        data: {
+          name: "run_command",
+          rawInput: { CommandLine: "vp run dev", IsDaemon: true, WaitMsBeforeAsync: 500 },
+        },
+      }),
+    ).toEqual({
+      taskId: "call_daemon",
+      kind: "command",
+      description: "vp run dev",
+    });
+
+    expect(
+      extractAntigravityBackgroundWorkTask({
+        toolCallId: "call_timer",
+        kind: "other",
+        title: "Run schedule",
+        status: "inProgress",
+        data: { name: "schedule", rawInput: { DurationSeconds: 10, Prompt: "Check build" } },
+      }),
+    ).toEqual({
+      taskId: "call_timer",
+      kind: "background_task",
+      description: "Check build",
+    });
+
+    expect(
+      extractAntigravityBackgroundWorkTask({
+        toolCallId: "call_cron_daemon",
+        kind: "other",
+        title: "Run schedule",
+        status: "inProgress",
+        data: {
+          name: "schedule",
+          rawInput: { CronExpression: "*/5 * * * *", IsDaemon: true },
+        },
+      }),
+    ).toEqual({
+      taskId: "call_cron_daemon",
+      kind: "monitor",
+      description: "Schedule (*/5 * * * *)",
+    });
+
+    expect(
+      extractAntigravityBackgroundWorkTask({
+        toolCallId: "call_workflow",
+        kind: "other",
+        title: "Run run_workflow",
+        status: "inProgress",
+        data: { name: "run_workflow", rawInput: { Description: "Fan out audit" } },
+      }),
+    ).toEqual({
+      taskId: "call_workflow",
+      kind: "background_task",
+      description: "Fan out audit",
+    });
+
+    expect(
+      extractAntigravityBackgroundWorkTask({
+        toolCallId: "call_subagent_v15",
+        kind: "other",
+        title: "Run invoke_subagent",
+        status: "inProgress",
+        data: { name: "invoke_subagent", rawInput: { Role: "Codebase Researcher" } },
+      }),
+    ).toEqual({
+      taskId: "call_subagent_v15",
+      kind: "subagent",
+      description: "Codebase Researcher",
+    });
+
+    // Legacy subagent titles stay owned by extractSubagentUpdate; MCP and ordinary reads are ignored.
+    expect(
+      extractAntigravityBackgroundWorkTask({
+        toolCallId: "call_legacy_subagent",
+        kind: "other",
+        title: "Running invoke_subagent",
+        status: "inProgress",
+        data: { name: "invoke_subagent" },
+      }),
+    ).toBeUndefined();
+    expect(
+      extractAntigravityBackgroundWorkTask({
+        toolCallId: "call_mcp",
+        kind: "execute",
+        title: "run_command",
+        status: "inProgress",
+        data: { name: "run_command", meta: { is_mcp_tool_call: true } },
+      }),
+    ).toBeUndefined();
+    expect(
+      extractAntigravityBackgroundWorkTask({
+        toolCallId: "call_read",
+        kind: "read",
+        title: "Read file",
+        status: "inProgress",
+        data: { name: "read_file" },
+      }),
+    ).toBeUndefined();
+  });
+
+  it("extracts rawOutput.output into command aggregatedOutput", () => {
+    const normalized = normalizeAntigravityToolCall({
+      toolCallId: "call_out",
+      kind: "execute",
+      title: "sleep 5 && echo DONE",
+      status: "completed",
+      data: {
+        rawInput: { CommandLine: "sleep 5 && echo DONE" },
+        rawOutput: {
+          output: "Command exited with code 0.\n\nCommand output:\nDONE\n",
+          exit_code: 0,
+        },
+      },
+    });
+    expect(normalized.data.item).toEqual({
+      command: "sleep 5 && echo DONE",
+      aggregatedOutput: "Command exited with code 0.\n\nCommand output:\nDONE\n",
+      exitCode: 0,
     });
   });
 });
