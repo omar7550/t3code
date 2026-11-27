@@ -2504,12 +2504,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         .subagents[0];
     // An unknown task gives no evidence the question is obsolete.
     if (task === undefined) return false;
+    if (["completed", "failed", "cancelled", "interrupted"].includes(task.status)) return true;
+    // A remote delegated task lives on a peer environment with no local child thread.
+    if (task.remoteChild !== undefined) return false;
     const childThreadId = task.childThreadId;
-    if (
-      childThreadId === null ||
-      ["completed", "failed", "cancelled", "interrupted"].includes(task.status)
-    )
-      return true;
+    if (childThreadId === null) return true;
     const child = yield* projectionStore
       .getThreadRecords(childThreadId, ["runtimeRequests"])
       .pipe(

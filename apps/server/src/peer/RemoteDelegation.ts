@@ -1,6 +1,7 @@
 import {
   CommandId,
   type EnvironmentId,
+  MessageId,
   NodeId,
   OrchestratorMcpCapabilitiesInput,
   OrchestratorMcpCapabilitiesResult,
@@ -17,7 +18,8 @@ import {
   type ProviderInstanceId,
   ProviderDriverKind,
   type RunId,
-  type ThreadId,
+  RuntimeRequestId,
+  ThreadId,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
@@ -25,12 +27,15 @@ import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schedule from "effect/Schedule";
+import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as Tool from "effect/ai/Tool";
+import { reportLabel } from "@t3tools/provider-core/server/notification";
 import { withExecutedModelNote } from "@t3tools/provider-core/server/subagentProjection";
 
 import type * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
@@ -72,12 +77,31 @@ export const FollowRetrySchedule = Context.Reference<Schedule.Schedule<unknown>>
   },
 );
 
+/** How often a follower checks a running remote child for pending user questions. */
+export const RemoteQuestionPollInterval = Context.Reference<Duration.Duration>(
+  "t3/peer/RemoteDelegation/RemoteQuestionPollInterval",
+  { defaultValue: () => Duration.seconds(10) },
+);
+
 type ThreadScope = McpInvocationContext.McpThreadInvocationScope;
 
 /** `orchestrator_capabilities` there. Its toolkit imports this module, so it is described here. */
 const RemoteCapabilitiesTool = Tool.make("orchestrator_capabilities", {
   parameters: OrchestratorMcpCapabilitiesInput,
   success: OrchestratorMcpCapabilitiesResult,
+  failure: OrchestratorMcpFailure,
+  failureMode: "return",
+});
+
+/** `t3_pending_request` (`list`) there, so pending questions on remote children wake the parent. */
+const RemotePendingRequestListTool = Tool.make("t3_pending_request", {
+  parameters: Schema.Struct({
+    action: Schema.Literal("list"),
+    threadId: ThreadId,
+  }),
+  success: Schema.Struct({
+    requestIds: Schema.Array(RuntimeRequestId),
+  }),
   failure: OrchestratorMcpFailure,
   failureMode: "return",
 });
@@ -157,6 +181,7 @@ const isFinal = (error: OrchestratorMcpFailure) =>
 
 const make = Effect.gen(function* () {
   const followRetry = yield* FollowRetrySchedule;
+  const questionPollInterval = yield* RemoteQuestionPollInterval;
   const forwarding = yield* PeerForwarding.PeerForwarding;
   const links = yield* PeerLinks.PeerLinks;
   const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
@@ -859,6 +884,57 @@ const make = Effect.gen(function* () {
           Option.isSome(ended) ? Effect.succeed({ endedHere: true } as const) : Effect.never,
         ),
       );
+    const seenQuestionIds = new Set<string>();
+    const label = reportLabel(task.title?.trim() || task.prompt);
+    const pollRemoteQuestions = Effect.sleep(questionPollInterval).pipe(
+      Effect.andThen(
+        forwarding
+          .call(scope, RemotePendingRequestListTool, remote.environmentId, {
+            action: "list",
+            threadId: remote.threadId,
+          })
+          .pipe(
+            Effect.flatMap(({ requestIds }) =>
+              Effect.forEach(
+                requestIds,
+                (requestId) => {
+                  if (seenQuestionIds.has(requestId)) return Effect.void;
+                  seenQuestionIds.add(requestId);
+                  const key = `${parentThreadId}:${requestId}`;
+                  return threads
+                    .dispatch({
+                      type: "message.dispatch",
+                      commandId: CommandId.make(`server:delegated-task-question:${key}`),
+                      threadId: parentThreadId,
+                      messageId: MessageId.make(`message:delegated-task-question:${key}`),
+                      text: `Delegated task ${taskId} on ${remote.label} is waiting on a question. Read it with t3_pending_request action read, environmentId ${remote.environmentId}, threadId ${remote.threadId}, and requestId ${requestId}. Answer it with t3_pending_request action respond (passing environmentId ${remote.environmentId}) when the answer follows from the task or the user's instructions; otherwise ask the user using your native question prompt tool (AskUserQuestion, ask_question, or request_user_input_async, never plain text alone) so T3 shows the native input card in this thread, then pass the user's answer back with t3_pending_request action respond. If it is no longer pending, it was answered or dismissed.`,
+                      notification: {
+                        source: { kind: "delegated_task", taskIds: [taskId] },
+                        outcome: "updated",
+                        summary: `Delegated task${label === undefined ? "" : ` "${label}"`} on ${remote.label} has a question`,
+                      },
+                      attachments: [],
+                      dispatchMode: { type: "queue_after_active" },
+                      createdBy: "agent",
+                      creationSource: "server",
+                    })
+                    .pipe(Effect.ignoreCause({ log: true }));
+                },
+                { concurrency: 1 },
+              ),
+            ),
+            Effect.catchCause((cause) =>
+              Effect.logDebug("remote-delegation.question-poll-failed", {
+                parentThreadId,
+                taskId,
+                cause: Cause.pretty(cause),
+              }),
+            ),
+          ),
+      ),
+      Effect.forever,
+    );
+    const questionWatcher = yield* Effect.forkChild(pollRemoteQuestions);
     const waited = yield* forwarding
       .waitForThread(scope, remote.environmentId, {
         threadId: remote.threadId,
@@ -869,7 +945,7 @@ const make = Effect.gen(function* () {
         // An older peer ignores this and reports the run alone.
         untilDelegatedWorkSettled: true,
       })
-      .pipe(Effect.raceFirst(endedHere));
+      .pipe(Effect.raceFirst(endedHere), Effect.ensuring(Fiber.interrupt(questionWatcher)));
     // The next look reads the result and stops it there.
     if ("endedHere" in waited) return false;
     if (waited.timedOut) return false;

@@ -17,6 +17,7 @@ import {
   type Project,
   type RepositoryIdentity,
   RunId,
+  RuntimeRequestId,
   type ServerProvider,
   ThreadId,
   TurnItemId,
@@ -25,6 +26,7 @@ import { expect, it } from "@effect/vitest";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -154,6 +156,8 @@ interface BoxThread {
   readonly sent: Ref.Ref<ReadonlyArray<string>>;
   /** Runs as the launch there is answered, before the laptop hears back. */
   readonly afterLaunch: Ref.Ref<Effect.Effect<void>>;
+  /** Pending user_input request ids on the remote thread. */
+  readonly pendingQuestions: Ref.Ref<ReadonlyArray<RuntimeRequestId>>;
 }
 
 const makeBoxThread = Effect.gen(function* () {
@@ -196,6 +200,7 @@ const makeBoxThread = Effect.gen(function* () {
     releaseStop: yield* Deferred.make<void>(),
     sent: yield* Ref.make<ReadonlyArray<string>>([]),
     afterLaunch: yield* Ref.make<Effect.Effect<void>>(Effect.void),
+    pendingQuestions: yield* Ref.make<ReadonlyArray<RuntimeRequestId>>([]),
   } satisfies BoxThread;
 });
 
@@ -272,11 +277,22 @@ const boxToolkitLayer = (thread: BoxThread) => {
       const status = yield* Ref.get(thread.status);
       const runless = yield* Ref.get(thread.runless);
       const model = yield* Ref.get(thread.executedModel);
+      const pendingQuestions = yield* Ref.get(thread.pendingQuestions);
       return shell === null
         ? (null as never)
         : {
             ...idleThreadProjection(shell),
             runs: runless ? [] : [runOf(status)],
+            runtimeRequests: pendingQuestions.map((id) => ({
+              id,
+              threadId,
+              nodeId: NodeId.make(`node:${id}`),
+              kind: "user_input",
+              status: "pending",
+              responseCapability: { type: "live", providerSessionId: "session:box" },
+              createdAt: DateTime.makeUnsafe(0),
+              resolvedAt: null,
+            })) as never,
             providerTurns: (model === null
               ? []
               : [{ runAttemptId: "attempt:box", ordinal: 1, model }]) as never,
@@ -571,9 +587,10 @@ const boxToolkitLayer = (thread: BoxThread) => {
         ),
       ),
   });
-  return Layer.merge(
+  return Layer.mergeAll(
     McpHttpServer.layerOrchestratorToolkit,
     McpHttpServer.layerProjectRegistration,
+    McpHttpServer.layerThreadToolkit,
   ).pipe(
     Layer.provide(DocumentText.layer.pipe(Layer.provideMerge(NodeServices.layer))),
     Layer.provide(NodeCrypto.layer),
@@ -2852,4 +2869,72 @@ it.effect("a local task runs in this thread's project", () =>
       expect(JSON.stringify(result.content)).toContain("invalid_request");
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.live(
+  "a remote child's pending question wakes the parent with environmentId and native prompt instructions",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const thread = yield* makeBoxThread;
+        const requestId = RuntimeRequestId.make("runtime-request:box:q1");
+        yield* Ref.set(thread.pendingQuestions, [requestId]);
+        const b = yield* serveBox(thread);
+        const offers = yield* SubscriptionRef.make<
+          ReadonlyArray<ProviderContinuationRequests.ProviderContinuationRequest>
+        >([]);
+        const database = yield* SqlitePersistence.layerMemory.pipe(Layer.build);
+        const a = yield* makeLaptop(database, offers).pipe(
+          Effect.provideService(RemoteDelegation.RemoteQuestionPollInterval, Duration.millis(25)),
+        );
+        yield* linkTo(a.links, b, "full-access");
+        yield* seedParent(a);
+
+        const delegated = yield* delegateToBox(a);
+        const remoteThreadId = yield* Ref.get(thread.launched);
+        expect(remoteThreadId).not.toBeNull();
+
+        // Wait for the parent thread to receive the question wake while the box child is still running.
+        const received = yield* a.orchestrator
+          .streamStoredEventsFrom({
+            threadId: parentThreadId,
+            afterSequence: 0,
+            eventType: "message.updated",
+          })
+          .pipe(
+            Stream.filter(
+              (stored) =>
+                stored.event.type === "message.updated" &&
+                stored.event.payload.id.startsWith(
+                  `message:delegated-task-question:${parentThreadId}:${requestId}`,
+                ),
+            ),
+            Stream.runHead,
+          );
+        const wakeMessage =
+          Option.isSome(received) && received.value.event.type === "message.updated"
+            ? received.value.event.payload
+            : undefined;
+        expect(wakeMessage).toBeDefined();
+        expect(wakeMessage!.text).toContain(`environmentId ${box.environmentId}`);
+        expect(wakeMessage!.text).toContain(`threadId ${remoteThreadId}`);
+        expect(wakeMessage!.text).toContain(`requestId ${requestId}`);
+        expect(wakeMessage!.text).toContain("native question prompt tool");
+
+        // Finish the remote task and verify only one wake was dispatched for this question.
+        yield* Ref.set(thread.pendingQuestions, []);
+        yield* Ref.set(thread.status, "completed");
+        yield* Ref.set(thread.reply, "Finished after answer.");
+        yield* Deferred.succeed(thread.finished, undefined);
+        expect(yield* taskResult(a, delegated.taskId)).toMatchObject({
+          status: "completed",
+          result: "Finished after answer.",
+        });
+        const { messages } = yield* a.projections.getThreadRecords(parentThreadId, ["messages"]);
+        const wakes = messages.filter((m) =>
+          m.id.startsWith(`message:delegated-task-question:${parentThreadId}:${requestId}`),
+        );
+        expect(wakes).toHaveLength(1);
+      }),
+    ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
